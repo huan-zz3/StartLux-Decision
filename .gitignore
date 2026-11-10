@@ -12,4 +12,6 @@ bench_*.csv
 *.predictions.jsonl
 .pytest_cache/
 .venv/
+.codegraph/
+models/
 *.log

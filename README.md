@@ -220,11 +220,19 @@ access log and an optional request log. [docs/serving_publicly.md](docs/serving_
 and a checklist. The other commands measure a deployment: `bench` for latency, `eval` for accuracy and calibration on
 labelled requests, and `quantize` for FP8, GGUF and MLX builds.
 
+## Fine-tuning
+
+`finetune/finetune_lora.py` adapts a v1.1 Instant folder to your own typed decisions with LoRA, then merges the
+adapter into a folder the same engines serve. It reads the prompt bidirectionally, as Instant models were trained, and
+can fit the per-type temperatures on a dev set. [docs/finetuning.md](docs/finetuning.md) has the environment, data
+format and commands; the first release keeps its causal trainer in `v1/finetune/`.
+
 ## Documentation
 
 | Document | Contents |
 |---|---|
 | [docs/api.md](docs/api.md) | request and response format, controls, confidence, `none_probability`, errors |
+| [docs/finetuning.md](docs/finetuning.md) | LoRA fine-tuning of v1.1 Instant models on your own decisions |
 | [docs/none_probability.md](docs/none_probability.md) | what `none_probability` means, how it was measured, why 0.2 |
 | [docs/deployment.md](docs/deployment.md) | engine settings, images and long inputs, compatibility with v1 models |
 | [docs/engines.md](docs/engines.md) | how each engine is driven and what was measured |

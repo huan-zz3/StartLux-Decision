@@ -38,6 +38,15 @@ vllm = ["vllm==0.31.0"]                              # the vLLM plugin is valida
 transformers = ["torch>=2.4", "transformers>=5.8,<5.9"]  # the bidirectional read-out reproduces transformers 5.8
 llamacpp = []                                        # llama-server is a separate program (llama.cpp)
 mlx = ["mlx-vlm>=0.7.6"]                              # the MLX engine; brings mlx
+finetune = [                                         # finetune/finetune_lora.py for v1.1 Instant folders
+    "torch>=2.8",
+    "transformers>=5.8,<5.9",
+    "huggingface_hub>=0.34",
+    "safetensors>=0.4",
+    "peft>=0.20",
+    "flash-linear-attention>=0.5.2; sys_platform == 'linux'",
+    "causal-conv1d>=1.7; sys_platform == 'linux'",
+]
 
 [project.scripts]
 startlux-decide = "startlux_decide.cli:main"
