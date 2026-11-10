@@ -14,7 +14,8 @@ script trees are intentionally separate.
   enough for the defaults, 24 GB is comfortable. bf16 training needs Ampere or later.
 - Python 3.10 to 3.12.
 - `transformers` **5.8.x** (the bidirectional prompt attention is written against that release), `peft >= 0.20`, and
-  `flash-linear-attention` + `causal-conv1d` on CUDA.
+  `flash-linear-attention` + `causal-conv1d` on CUDA. The `finetune` extra also installs Pillow and torchvision for
+  image inputs.
 - About 10 GB of disk for the source folder, the merged copy, the adapter and logs.
 
 ```bash
@@ -32,8 +33,9 @@ pip install -e '.[finetune]'
 # pip install causal-conv1d --no-build-isolation
 ```
 
-The tested stack is torch 2.11.0+cu128, transformers 5.8.1, peft 0.21.2, flash-linear-attention 0.5.2 and
-causal-conv1d 1.7.0 on an A40; the v1 release used the same torch and transformers generation on an H200.
+The tested stack is torch 2.11.0+cu128, transformers 5.8.1, peft 0.21.2, flash-linear-attention 0.5.2,
+causal-conv1d 1.7.0, torchvision 0.26.0+cu128 and Pillow 12.3.0 on an A40; the v1 release used the same torch and
+transformers generation on an H200.
 `pip install -e '.[finetune]'` will not replace an already installed compatible
 torch; if PyTorch is absent it installs the latest PyPI build, which may not match your driver. The kernels matter:
 without flash-linear-attention and causal-conv1d, transformers silently falls back to a plain PyTorch path that is
@@ -84,8 +86,28 @@ Target keys follow the question type: the criteria keys for `choice`, `"true"` /
 they are. Questions without a target are skipped, and so are `choice` lists with more than 26 options. Keep 10% to 20%
 of the data aside as a dev set.
 
-The trainer is text-only. Images are part of the model's evidence at serving time, but this script does not train on
-image inputs.
+### Images
+
+A record may carry images in the same form as a request: a record-level `images` list of base64 strings or data URIs,
+and `<image>` marks in the state that say where each image goes. Without marks the images come first, as in
+`images.place_images`. Only base64/data URIs are accepted; local file paths are not.
+
+```json
+{"state": "Photo taken at delivery: <image>",
+ "images": ["data:image/png;base64,iVBORw0KGgo..."],
+ "questions": {"damaged": {"type": "noul", "instructions": "Is the parcel damaged?"}},
+ "targets": {"damaged": {"true": 1.0}}}
+```
+
+Each image is resized within the serving path's `--min-pixels` (65,536) and `--max-pixels` (1,048,576) bounds and
+takes one token per 32 x 32 pixels. Training resamples each image once with PIL and the processor then sees that
+target size, so pixel values need not be bit-identical to serving, but the size bounds and token counts are. The
+effective prompt length includes those image tokens; a question whose prompt is over `--max-length` is skipped. A
+record may hold up to 16 images, and all questions of the record read the same images.
+
+The model folder must have a vision tower (the script exits otherwise). The tower stays frozen and LoRA is still
+applied to the text decoder only. Records with images run one at a time (batch size 1); text-only records keep the
+length-sorted batching. If a large image dataset does not fit in memory, lower `--max-pixels` first.
 
 ## Train
 
@@ -99,9 +121,10 @@ python finetune/finetune_lora.py \
 ```
 
 Defaults: rank 16, alpha 32, dropout 0.05, learning rate 1e-4 with 5% warm-up and cosine decay, 2 epochs,
-micro-batches of up to 16,384 padded tokens and 4 micro-batches per optimizer step, prompts up to 8,192 tokens.
-The script prints dev loss and accuracy before training, after each epoch and at the end. If you run out of memory,
-lower `--max-tokens` (for example 8,192) or `--max-length` first.
+micro-batches of up to 16,384 padded tokens and 4 micro-batches per optimizer step, prompts up to 8,192 tokens,
+images resized within `--min-pixels 65536` and `--max-pixels 1048576`. The script prints dev loss and accuracy before
+training, after each epoch and at the end. If you run out of memory, lower `--max-tokens` (for example 8,192),
+`--max-length`, or `--max-pixels` first.
 
 Only LoRA adapters on the linear layers of the text decoder are trained. The script saves:
 
@@ -115,13 +138,13 @@ runs/0.8b-lora/merged/     # the merged full model, ready to serve
 
 ## Calibrate
 
-`--calibrate` uses the final dev read-outs and fits one temperature per question type (choice, yes/no, score). A
-temperature never changes which option wins; it only sharpens or flattens the probabilities. Types with fewer than
-200 dev questions get the pooled temperature. The fitted values are written to
+`--calibrate` uses the final dev read-outs and fits one temperature per question type (choice, yes/no, score); dev
+records with images are included. A temperature never changes which option wins; it only sharpens or flattens the
+probabilities. Types with fewer than 200 dev questions get the pooled temperature. The fitted values are written to
 `runs/0.8b-lora/merged/decision_config.json`.
 
-If you do not pass `--calibrate`, the temperatures are copied unchanged from the source model. Calibration requires a
-merged model, so it cannot be combined with `--no-merge`.
+If you do not pass `--calibrate`, the temperatures are copied unchanged from the source model. Calibration needs
+`--dev` and a merged model, so it cannot be combined with `--no-merge`.
 
 Watch two things, as with v1: if the model is right on nearly every dev question, the fit pushes the temperature to
 the bottom of its range and the probabilities become very sharp on new data; use a larger or harder dev set. A
@@ -147,6 +170,8 @@ startlux-decide serve \
   --launch-vllm --gpus 0 \
   --port 8090
 ```
+
+The server takes 8 images per request by default; pass `--max-images 16` when your records carry more.
 
 Do not evaluate the fine-tuned folder through a causal path. The v1 calibrate script and the v1 inference engine read
 causally; they are the wrong reference for an Instant model. Compare the original and fine-tuned folders with the same

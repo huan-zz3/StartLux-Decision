@@ -1,6 +1,6 @@
-"""The v1.1 Instant fine-tuning script (finetune/finetune_lora.py): data loading and target normalization, batching,
-padding, temperature fitting, and (where torch + transformers 5.8 + STARTLUX_TEST_MODEL_DIR + peft are available) one
-tiny CPU training step on a random model with the architecture of a real folder.
+"""The v1.1 Instant fine-tuning script (finetune/finetune_lora.py): data loading (text and image records) and target
+normalization, batching, padding, temperature fitting, and (where torch + transformers 5.8 + STARTLUX_TEST_MODEL_DIR +
+peft are available) one tiny CPU training step on a random model with the architecture of a real folder.
 
 The pure tests need only the standard library plus the package's FakeTokenizer.  The tiny-model test is skipped unless
 every optional dependency is present; it never downloads a model or uses a GPU.
@@ -8,15 +8,16 @@ every optional dependency is present; it never downloads a model or uses a GPU.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 from startlux_decide.backends.fake import FakeTokenizer
-from tests.folders import make_folder
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "finetune", "finetune_lora.py")
@@ -25,11 +26,28 @@ SCRIPT = os.path.join(ROOT, "finetune", "finetune_lora.py")
 def _load_script():
     spec = importlib.util.spec_from_file_location("startlux_finetune_lora", SCRIPT)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module          # dataclasses resolves cls.__module__ through sys.modules
     spec.loader.exec_module(module)
     return module
 
 
 finetune = _load_script()
+
+try:
+    from PIL import Image
+
+    HAS_PIL = True
+except ImportError:
+    Image = None
+    HAS_PIL = False
+
+
+def _png_uri(width=8, height=8):
+    """A tiny PNG as a data URI (needs Pillow)."""
+    import base64
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), (120, 30, 200)).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def _row(**over):
@@ -62,10 +80,13 @@ class LoadItemsTest(unittest.TestCase):
         items, skipped = finetune.load_items(path, self.tok, 8192)
         self.assertEqual(skipped, 0)
         self.assertEqual(len(items), 1)
-        ids, count, vec, typ = items[0]
-        self.assertEqual((count, typ), (2, "choice"))
-        self.assertEqual(vec, [0.25, 0.75])
-        self.assertGreater(len(ids), 0)
+        item = items[0]
+        self.assertEqual((item.options, item.type), (2, "choice"))
+        self.assertEqual(item.target, [0.25, 0.75])
+        self.assertGreater(len(item.ids), 0)
+        self.assertEqual(item.length, len(item.ids))
+        self.assertIsNone(item.prompt)
+        self.assertIsNone(item.media)
 
     def test_questions_without_targets_are_skipped(self):
         rec = _row()
@@ -124,10 +145,105 @@ class LoadItemsTest(unittest.TestCase):
         self.assertIn(":1", str(ctx.exception))
 
 
+@unittest.skipUnless(HAS_PIL, "needs Pillow to build image records")
+class ImageLoadItemsTest(unittest.TestCase):
+    def setUp(self):
+        self.tok = FakeTokenizer()
+        self.dir = tempfile.mkdtemp(prefix="startlux_finetune_images_")
+        self.uri = _png_uri()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _load(self, rec, max_length=8192):
+        path = _write_jsonl(self.dir, [rec])
+        return finetune.load_items(path, self.tok, max_length)
+
+    def test_image_record_expands_length_and_keeps_prompt_and_media(self):
+        rec = _row(images=[self.uri])
+        rec["state"] = "Photo: <image>"
+        items, skipped = self._load(rec)
+        self.assertEqual(skipped, 0)
+        item = items[0]
+        self.assertIsNotNone(item.media)
+        self.assertIsNotNone(item.prompt)
+        self.assertIn(finetune.IMAGE_PLACEHOLDER, item.prompt)
+        self.assertEqual(len(item.media), 1)
+        self.assertEqual(item.media.tokens, [64])       # 8x8 -> 256x256 -> 8x8 image tokens
+        self.assertEqual(item.length, len(item.ids) + item.media.tokens[0] - 1)
+        self.assertGreater(item.length, len(item.ids))
+        self.assertEqual(item.media.images[0].size, (256, 256))   # resized once, before the processor
+        self.assertEqual(item.media.raw, [])                      # the encoded bytes are not kept
+
+    def test_image_marks_place_images_in_order(self):
+        rec = _row(images=[self.uri, self.uri])
+        rec["state"] = "left <image> right <image>"
+        items, _ = self._load(rec)
+        item = items[0]
+        self.assertEqual(item.prompt.count(finetune.IMAGE_PLACEHOLDER), 2)
+        self.assertLess(item.prompt.index("left"), item.prompt.index(finetune.IMAGE_PLACEHOLDER))
+        self.assertLess(item.prompt.index("right"), item.prompt.rindex(finetune.IMAGE_PLACEHOLDER))
+        self.assertEqual(item.length, len(item.ids) + 2 * (item.media.tokens[0] - 1))
+
+    def test_empty_image_list_is_a_text_record(self):
+        items, skipped = self._load(_row(images=[]))
+        self.assertEqual(skipped, 0)
+        self.assertIsNone(items[0].media)
+        self.assertIsNone(items[0].prompt)
+        self.assertEqual(items[0].length, len(items[0].ids))
+
+    def test_without_marks_images_come_first(self):
+        rec = _row(images=[self.uri])
+        rec["state"] = "Photo attached"
+        items, _ = self._load(rec)
+        prompt = items[0].prompt
+        self.assertIn(finetune.IMAGE_PLACEHOLDER, prompt)
+        self.assertLess(prompt.index(finetune.IMAGE_PLACEHOLDER), prompt.index("Photo attached"))
+
+    def test_max_length_uses_expanded_image_length(self):
+        rec = _row(images=[self.uri])
+        rec["state"] = "Photo: <image>"
+        items, _ = self._load(rec)
+        item = items[0]
+        items, skipped = self._load(rec, max_length=len(item.ids))
+        self.assertEqual(items, [])
+        self.assertEqual(skipped, 1)
+
+    def test_marks_without_images_raise_with_file_and_line(self):
+        rec = _row()
+        rec["state"] = "Photo: <image>"
+        path = _write_jsonl(self.dir, [rec])
+        with self.assertRaises(ValueError) as ctx:
+            finetune.load_items(path, self.tok, 8192)
+        self.assertIn(path, str(ctx.exception))
+        self.assertIn(":1", str(ctx.exception))
+        self.assertIn("<image>", str(ctx.exception))
+
+    def test_mark_count_mismatch_raises_with_file_and_line(self):
+        rec = _row(images=[self.uri, self.uri])
+        rec["state"] = "Photo: <image>"
+        path = _write_jsonl(self.dir, [rec])
+        with self.assertRaises(ValueError) as ctx:
+            finetune.load_items(path, self.tok, 8192)
+        self.assertIn(path, str(ctx.exception))
+        self.assertIn(":1", str(ctx.exception))
+        self.assertIn("marks", str(ctx.exception))
+
+    def test_bad_image_raises_with_file_and_line(self):
+        rec = _row(images=["not base64!"])
+        rec["state"] = "Photo: <image>"
+        path = _write_jsonl(self.dir, [rec])
+        with self.assertRaises(ValueError) as ctx:
+            finetune.load_items(path, self.tok, 8192)
+        self.assertIn(path, str(ctx.exception))
+        self.assertIn(":1", str(ctx.exception))
+
+
 class BatchesTest(unittest.TestCase):
     def test_every_item_lands_in_exactly_one_bucket(self):
         lengths = [5, 130, 200, 129, 400, 50, 1200, 300]
-        items = [(list(range(n)), 2, [1.0, 0.0], "noul") for n in lengths]
+        items = [finetune.Item(ids=list(range(n)), options=2, target=[1.0, 0.0], type="noul", length=n)
+                 for n in lengths]
         plan = finetune.batches(items, 1024, False, 0)
         self.assertEqual(sorted(i for bucket in plan for i in bucket), list(range(len(items))))
         for bucket in plan:                     # a bucket larger than max_tokens holds a single long item
@@ -138,8 +254,19 @@ class BatchesTest(unittest.TestCase):
             self.assertGreaterEqual(max(lengths[i] for i in bucket),
                                     max(lengths[i] for i in plan[plan.index(bucket) + 1]))
 
+    def test_image_items_are_singletons(self):
+        items = [finetune.Item(ids=list(range(n)), options=2, target=[1.0, 0.0], type="noul", length=n)
+                 for n in (50, 400, 60)]
+        items.append(finetune.Item(ids=[1, 2, 3], options=2, target=[1.0, 0.0], type="noul", length=3,
+                                   prompt="p", media=object()))
+        plan = finetune.batches(items, 4096, False, 0)
+        image_buckets = [b for b in plan if any(items[i].media is not None for i in b)]
+        self.assertEqual(image_buckets, [[3]])
+        self.assertEqual(sorted(i for bucket in plan for i in bucket), list(range(len(items))))
+
     def test_shuffle_changes_bucket_order_only(self):
-        items = [(list(range(n)), 2, [1.0, 0.0], "noul") for n in range(1, 60)]
+        items = [finetune.Item(ids=list(range(n)), options=2, target=[1.0, 0.0], type="noul", length=n)
+                 for n in range(1, 60)]
         a = finetune.batches(items, 512, False, 0)
         b = finetune.batches(items, 512, True, 0)
         self.assertEqual(sorted(map(sorted, a)), sorted(map(sorted, b)))
@@ -152,6 +279,17 @@ class PaddedLengthTest(unittest.TestCase):
         self.assertEqual(finetune.padded_length(129), 192)
         self.assertEqual(finetune.padded_length(8193), 10240)
         self.assertEqual(finetune.padded_length(70000), 73728)
+
+
+@unittest.skipIf(finetune.torch is None, "needs torch for the batch guard")
+class StepLossGuardTest(unittest.TestCase):
+    def test_an_image_item_in_a_text_batch_is_refused(self):
+        items = [finetune.Item(ids=[1, 2], options=2, target=[1.0, 0.0], type="noul", length=2),
+                 finetune.Item(ids=[1, 2, 3], options=2, target=[1.0, 0.0], type="noul", length=3,
+                               prompt="p", media=object())]
+        with self.assertRaises(ValueError) as ctx:
+            finetune.step_loss(None, None, None, items, [0, 1], 0, finetune.torch.device("cpu"), None, None)
+        self.assertIn("forward of its own", str(ctx.exception))
 
 
 @unittest.skipIf(finetune.torch is None, "needs torch for temperature fitting")

@@ -222,10 +222,10 @@ labelled requests, and `quantize` for FP8, GGUF and MLX builds.
 
 ## Fine-tuning
 
-`finetune/finetune_lora.py` adapts a v1.1 Instant folder to your own typed decisions with LoRA, then merges the
-adapter into a folder the same engines serve. It reads the prompt bidirectionally, as Instant models were trained, and
-can fit the per-type temperatures on a dev set. [docs/finetuning.md](docs/finetuning.md) has the environment, data
-format and commands; the first release keeps its causal trainer in `v1/finetune/`.
+`finetune/finetune_lora.py` adapts a v1.1 Instant folder to your own typed decisions with LoRA on text or image
+records, then merges the adapter into a folder the same engines serve. It reads the prompt bidirectionally, as Instant
+models were trained, and can fit the per-type temperatures on a dev set. [docs/finetuning.md](docs/finetuning.md) has
+the environment, data format and commands; the first release keeps its causal trainer in `v1/finetune/`.
 
 ## Documentation
 

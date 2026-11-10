@@ -6,10 +6,17 @@
 
 Data, one JSON object per line (same shape as docs/finetuning.md):
 
-    {"state": <string or object>, "questions": {key: <TypeSafe question>}, "targets": {key: {option: probability}}}
+    {"state": <string or object>, "questions": {key: <TypeSafe question>}, "targets": {key: {option: probability}},
+     "images": [...]?}
 
 Target keys follow the question type: choice -> its criteria keys, noul -> "true" / "false", score -> "0".."n-1"
 (lowest level first).  A hard label is a one-hot distribution; a spread of annotator votes can be given as is.
+
+``images`` is optional and record-level, shared by every question in the record: a list of base64 strings or data
+URIs, exactly as the HTTP API takes them (no local file paths).  ``<image>`` marks in the state place the images in
+order; without marks they come first, like the serving path.  Image records are trained one at a time (the vision
+tower stays frozen) and the text decoder still reads them with bidirectional prompt attention; text-only records keep
+the length-bucketed batching.
 
 Each question is rendered exactly as StartLux-Decision renders it when serving, and the loss is the cross-entropy
 between the target and the softmax over the option letters at the answer position (the readout these models use), so
@@ -33,6 +40,7 @@ import shutil
 import sys
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass
 
 try:                                    # torch is optional so the data helpers (and their tests) import without it
     import torch
@@ -41,9 +49,11 @@ except ImportError:                     # pragma: no cover - exercised only when
     torch = F = None
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from startlux_decide.images import (IMAGE_MARK, IMAGE_PLACEHOLDER, MAX_IMAGES, MAX_PIXELS,  # noqa: E402
+                                    MIN_PIXELS, Media, load_media, place_images)
 from startlux_decide.modelcfg import load_model_folder  # noqa: E402
 from startlux_decide.prompt import (MAX_OPTIONS, check_tokenizer, from_systemone, messages,  # noqa: E402
-                                    plain_prompt)
+                                    plain_prompt, state_text)
 
 # Batched inputs are padded to one of these lengths: the linear-attention kernels are compiled once per sequence
 # length, so padding to exact lengths would recompile for almost every batch.  Copied from the v1 trainer.
@@ -62,11 +72,47 @@ def padded_length(n):
     return -(-n // 8192) * 8192
 
 
-def load_items(path, tok, max_length):
-    """-> [(input_ids, number of options, target vector in option order, question type)], number skipped.
+@dataclass
+class Item:
+    """One rendered question.
 
-    Questions without targets are skipped, as are choice questions over 26 options and prompts longer than
-    `max_length`.  A malformed row or target raises with the file and line instead of silently disappearing.
+    `ids` are the prompt's token ids with image placeholders still unexpanded; `length` is the effective sequence
+    length after the processor expands every image (`len(ids) + sum(tokens - 1)` for image items).  `prompt` and
+    `media` are set for image items only; text items keep them None.
+    """
+    ids: list
+    options: int
+    target: list
+    type: str
+    length: int
+    prompt: str | None = None
+    media: Media | None = None
+
+
+def _record_media(rec, path, line, image_factor, min_pixels, max_pixels, max_images):
+    """The record's images (None for text-only), resized to the processor's target size to bound memory."""
+    values = rec.get("images")
+    if values is None or values == []:
+        return None
+    try:
+        media = load_media(values, min_pixels, max_pixels, max_images, image_factor)
+    except ValueError as e:
+        raise ValueError(f"{path}:{line}: {e}") from None
+    from PIL import Image                      # load_media imported it already, so it is installed
+    for k, (h, w) in enumerate(media.sizes):   # the processor would resize within these bounds anyway
+        if (media.images[k].height, media.images[k].width) != (h, w):
+            media.images[k] = media.images[k].resize((w, h), Image.Resampling.BICUBIC)
+    media.raw = []                             # keep the resize, not the full-size decodes, until a question runs
+    return media
+
+
+def load_items(path, tok, max_length, *, image_factor=32, min_pixels=MIN_PIXELS, max_pixels=MAX_PIXELS,
+               max_images=MAX_IMAGES):
+    """-> ([Item], number skipped).
+
+    Questions without targets are skipped, as are choice questions over 26 options and prompts whose effective length
+    (after image expansion) exceeds `max_length`.  A malformed row, target or image raises with the file and line
+    instead of silently disappearing.
     """
     items, skipped = [], 0
     with open(path, encoding="utf-8") as f:
@@ -82,6 +128,15 @@ def load_items(path, tok, max_length):
             targets = rec.get("targets") or {}
             if not isinstance(targets, dict):
                 raise ValueError(f"{path}:{n}: targets must be an object")
+            state = state_text(rec.get("state"))
+            media = _record_media(rec, path, n, image_factor, min_pixels, max_pixels, max_images)
+            if media is None and IMAGE_MARK in state:
+                raise ValueError(f"{path}:{n}: the state has {IMAGE_MARK} marks but the record has no images")
+            if media is not None:
+                try:
+                    state = place_images(state, len(media))
+                except ValueError as e:
+                    raise ValueError(f"{path}:{n}: {e}") from None
             for key, q in rec["questions"].items():
                 target = targets.get(key)
                 if target is None:
@@ -90,7 +145,7 @@ def load_items(path, tok, max_length):
                     raise ValueError(f"{path}:{n} question {key!r}: target must be an object mapping option ids to "
                                      "probabilities")
                 try:
-                    row = from_systemone(rec.get("state"), q)
+                    row = from_systemone(state, q)
                     order = [o["id"] for o in row["options"]]
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     raise ValueError(f"{path}:{n} question {key!r}: {e}") from None
@@ -98,8 +153,8 @@ def load_items(path, tok, max_length):
                     skipped += 1            # split very wide lists into groups of up to 26 before training
                     continue
                 try:
-                    text = plain_prompt(tok, messages(row))
-                    ids = tok.encode(text, add_special_tokens=False)
+                    prompt = plain_prompt(tok, messages(row))
+                    ids = tok.encode(prompt, add_special_tokens=False)
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     raise ValueError(f"{path}:{n} question {key!r}: {e}") from None
                 try:
@@ -109,19 +164,39 @@ def load_items(path, tok, max_length):
                 total = math.fsum(vec)
                 if total <= 0:
                     raise ValueError(f"{path}:{n} question {key!r}: target has no mass on the listed options")
-                if len(ids) > max_length:
+                if media is not None:
+                    if prompt.count(IMAGE_PLACEHOLDER) != len(media):
+                        raise ValueError(f"{path}:{n} question {key!r}: the chat template wrote "
+                                         f"{prompt.count(IMAGE_PLACEHOLDER)} image placeholders for {len(media)} "
+                                         "images")
+                    length = len(ids) + sum(t - 1 for t in media.tokens)
+                else:
+                    prompt = None
+                    length = len(ids)
+                if length > max_length:
                     skipped += 1
                     continue
-                items.append((ids, len(order), [v / total for v in vec], row["type"]))
+                items.append(Item(ids=ids, options=len(order), target=[v / total for v in vec], type=row["type"],
+                                  length=length, prompt=prompt, media=media))
     return items, skipped
 
 
 def batches(items, max_tokens, shuffle, seed):
-    """Length-sorted buckets of up to max_tokens padded tokens, shuffled bucket order."""
-    order = sorted(range(len(items)), key=lambda i: -len(items[i][0]))
+    """Length-sorted buckets of up to max_tokens padded tokens, shuffled bucket order.
+
+    Image items go in a forward of their own: an open text bucket is flushed and the image item is appended alone.
+    """
+    order = sorted(range(len(items)), key=lambda i: -items[i].length)
     out, cur, longest = [], [], 0
     for i in order:
-        n = padded_length(len(items[i][0]))
+        item = items[i]
+        if item.media is not None:
+            if cur:
+                out.append(cur)
+                cur, longest = [], 0
+            out.append([i])
+            continue
+        n = padded_length(item.length)
         if cur and max(longest, n) * (len(cur) + 1) > max_tokens:
             out.append(cur)
             cur, longest = [], 0
@@ -134,24 +209,66 @@ def batches(items, max_tokens, shuffle, seed):
     return out
 
 
-def step_loss(decoder, letter_rows, items, idx, pad, device):
-    """Cross-entropy over the option letters at the answer position.  Returns (loss, correct, logits, target)."""
+def _image_loss(decoder, inner, letter_rows, item, device, processor, image_token):
+    """One image item through the model's own image path, read with bidirectional prompt attention."""
     from startlux_decide.backends import bidirectional
 
-    longest = padded_length(max(len(items[i][0]) for i in idx))     # a few fixed lengths: kernels compile once each
-    k = max(items[i][1] for i in idx)
+    media = item.media
+    enc = processor(text=[item.prompt], images=list(media.images), size=media.processor_size, return_tensors="pt")
+    feed = {k: enc[k].to(device) for k in ("input_ids", "pixel_values", "image_grid_thw") if k in enc}
+    input_ids = feed["input_ids"]
+    types = enc.get("mm_token_type_ids")
+    feed["mm_token_type_ids"] = (types.to(device) if types is not None
+                                 else (input_ids == image_token).int().to(device))
+    if int((input_ids == image_token).sum()) != sum(media.tokens):
+        raise RuntimeError(f"the processor gave {int((input_ids == image_token).sum())} image tokens, expected "
+                           f"{sum(media.tokens)}")
+    embeds = inner.get_input_embeddings()(input_ids)
+    with torch.no_grad():                    # the vision tower stays frozen; the text decoder keeps its graph
+        feats = inner.get_image_features(feed["pixel_values"], feed["image_grid_thw"], return_dict=True).pooler_output
+        feats = torch.cat(list(feats), 0).to(embeds.device, embeds.dtype)
+    mask, _ = inner.get_placeholder_mask(input_ids, inputs_embeds=embeds, image_features=feats)
+    embeds = embeds.masked_scatter(mask, feats)
+    positions, _ = inner.get_rope_index(input_ids, image_grid_thw=feed["image_grid_thw"], attention_mask=None,
+                                        mm_token_type_ids=feed["mm_token_type_ids"])
+    hidden = bidirectional.text_forward(decoder, inputs_embeds=embeds, position_ids=positions)
+    h = hidden[0, -1].float()
+    k = item.options
+    logits = (h @ letter_rows[:k].T).unsqueeze(0)
+    target = torch.tensor(item.target, device=device).unsqueeze(0)
+    logp = F.log_softmax(logits, -1)
+    loss = -(target * logp).sum(-1).mean()
+    correct = (logits.argmax(-1) == target.argmax(-1)).float().sum().item()
+    return loss, correct, logits.detach(), target.detach()
+
+
+def step_loss(decoder, inner, letter_rows, items, idx, pad, device, processor, image_token):
+    """Cross-entropy over the option letters at the answer position.  Returns (loss, correct, logits, target).
+
+    Image items run alone (idx has one element); text items keep the padded, length-bucketed batch.
+    """
+    from startlux_decide.backends import bidirectional
+
+    if len(idx) > 1 and any(items[i].media is not None for i in idx):
+        raise ValueError("an image item must run in a forward of its own (batches keeps image items apart)")
+    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
+    if len(idx) == 1 and items[idx[0]].media is not None:
+        with ctx:
+            return _image_loss(decoder, inner, letter_rows, items[idx[0]], device, processor, image_token)
+
+    longest = padded_length(max(items[i].length for i in idx))     # a few fixed lengths: kernels compile once each
+    k = max(items[i].options for i in idx)
     ids = torch.full((len(idx), longest), pad, dtype=torch.long)
     attn = torch.zeros_like(ids)
     target = torch.zeros((len(idx), k))
     mask = torch.zeros((len(idx), k), dtype=torch.bool)
     for j, i in enumerate(idx):
-        t, c, vec, _ = items[i]
-        ids[j, :len(t)] = torch.tensor(t)
-        attn[j, :len(t)] = 1
-        target[j, :c] = torch.tensor(vec)
-        mask[j, :c] = True
+        item = items[i]
+        ids[j, :len(item.ids)] = torch.tensor(item.ids)
+        attn[j, :len(item.ids)] = 1
+        target[j, :item.options] = torch.tensor(item.target)
+        mask[j, :item.options] = True
     ids, attn, target, mask = ids.to(device), attn.to(device), target.to(device), mask.to(device)
-    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
     with ctx:
         hidden = bidirectional.text_forward(decoder, input_ids=ids, attention_mask=attn, valid=attn, causal=False)
     h = hidden[torch.arange(len(idx), device=device), attn.sum(1) - 1].float()
@@ -223,6 +340,8 @@ def train(a, tokenizer=None):
         raise SystemExit("--calibrate needs --dev (held-out data to fit the temperatures on)")
     if a.calibrate and a.no_merge:
         raise SystemExit("--calibrate writes decision_config.json into the merged model; drop --no-merge")
+    if a.min_pixels < 1 or a.max_pixels < a.min_pixels:
+        raise SystemExit("--min-pixels must be at least 1 and --max-pixels must be at least --min-pixels")
 
     if tokenizer is None:
         from transformers import AutoTokenizer
@@ -232,8 +351,10 @@ def train(a, tokenizer=None):
     if folder.letter_token_ids is not None and list(letters) != list(folder.letter_token_ids):
         raise ValueError("tokenizer letter ids differ from decision_config.json")
 
-    train_items, skipped = load_items(a.train, tok, a.max_length)
-    dev_items, _ = load_items(a.dev, tok, a.max_length) if a.dev else ([], 0)
+    train_items, skipped = load_items(a.train, tok, a.max_length, image_factor=folder.image_factor,
+                                      min_pixels=a.min_pixels, max_pixels=a.max_pixels)
+    dev_items, _ = (load_items(a.dev, tok, a.max_length, image_factor=folder.image_factor,
+                               min_pixels=a.min_pixels, max_pixels=a.max_pixels) if a.dev else ([], 0))
     print(f"{len(train_items)} training questions ({skipped} skipped: too long or over {MAX_OPTIONS} options), "
           f"{len(dev_items)} dev questions", flush=True)
     if not train_items:
@@ -246,12 +367,25 @@ def train(a, tokenizer=None):
 
     from startlux_decide.backends import bidirectional
 
+    has_images = any(item.media is not None for item in train_items + dev_items)
+    if has_images and not folder.vision:
+        raise SystemExit("this model folder has no vision tower; its text decoder cannot read image evidence")
+    processor = None
+    if has_images:
+        try:
+            processor = transformers.AutoProcessor.from_pretrained(a.model)
+        except (OSError, ValueError, ImportError) as e:
+            raise SystemExit(f"cannot load the image processor of {a.model}: {e}") from None
+
     torch.manual_seed(a.seed)
     device = torch.device(a.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
 
     config = transformers.AutoConfig.from_pretrained(a.model)
     cls = getattr(transformers, config.architectures[0])
+    image_token = getattr(config, "image_token_id", None)
+    if has_images and image_token is None:
+        raise SystemExit(f"{a.model}: config.json has no image_token_id, so the images' tokens cannot be placed")
     model = cls.from_pretrained(a.model, dtype=dtype, device_map={"": device})
     inner = model.model
     body = getattr(inner, "language_model", inner)
@@ -280,14 +414,15 @@ def train(a, tokenizer=None):
         pairs = {"choice": [], "noul": [], "score": []}
         with torch.no_grad():
             for idx in batches(dev_items, a.max_tokens, False, 0):
-                loss, c, logits, target = step_loss(decoder, letter_rows, dev_items, idx, pad, device)
+                loss, c, logits, target = step_loss(decoder, inner, letter_rows, dev_items, idx, pad, device,
+                                                    processor, image_token)
                 loss_sum += loss.item() * len(idx)
                 correct += c
                 n += len(idx)
                 if collect:
                     for j, i in enumerate(idx):
-                        k = dev_items[i][1]
-                        pairs[dev_items[i][3]].append((logits[j, :k].cpu(), target[j, :k].cpu()))
+                        k = dev_items[i].options
+                        pairs[dev_items[i].type].append((logits[j, :k].cpu(), target[j, :k].cpu()))
         peft_model.train()
         stats = {"dev_loss": round(loss_sum / n, 4), "dev_accuracy": round(correct / n, 4)}
         return (stats, pairs) if collect else stats
@@ -299,7 +434,8 @@ def train(a, tokenizer=None):
     epoch = 0
     while step < total_steps:
         for idx in batches(train_items, a.max_tokens, True, a.seed + epoch):
-            loss, _, _, _ = step_loss(decoder, letter_rows, train_items, idx, pad, device)
+            loss, _, _, _ = step_loss(decoder, inner, letter_rows, train_items, idx, pad, device, processor,
+                                      image_token)
             (loss / a.accum).backward()
             micro += 1
             if micro % a.accum:
@@ -367,6 +503,10 @@ def main(argv=None, tokenizer=None):
     ap.add_argument("--max-tokens", type=int, default=16384, help="padded tokens per micro-batch")
     ap.add_argument("--accum", type=int, default=4, help="micro-batches per optimizer step")
     ap.add_argument("--max-length", type=int, default=8192)
+    ap.add_argument("--min-pixels", type=int, default=MIN_PIXELS,
+                    help="smallest image area after the processor's resize")
+    ap.add_argument("--max-pixels", type=int, default=MAX_PIXELS,
+                    help="largest image area after the processor's resize")
     ap.add_argument("--warmup", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-merge", action="store_true", help="only save the LoRA adapter")
