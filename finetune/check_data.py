@@ -42,7 +42,7 @@
     E19 [contract] target 值不是有限数字（NaN/Infinity）
 
     W01 同一个问题键在不同记录里 type/instructions/选项集合不同
-    W02 某个选项 id 从未被任何 target 使用
+    W02 某个问题里的选项从未作为该问题的答案出现
     W03 未知顶层键；空问题键；渲染器丢弃的 noul criteria；同一 split 内重复 state；state 长度超过中位数 4 倍
     W04 --role dev：某类型的问题少于 200 个
 
@@ -213,7 +213,7 @@ RULE_INFO = {
     "E18": ("trainer", "prompt 有效长度超限"),
     "E19": ("contract", "target 含非有限数字"),
     "W01": ("observation", "同一个问题键的规格不一致"),
-    "W02": ("observation", "选项从未被 target 使用"),
+    "W02": ("observation", "问题里的选项从未作为答案出现"),
     "W03": ("observation", "数据观察项"),
     "W04": ("observation", "dev 集某类型问题过少"),
 }
@@ -849,9 +849,9 @@ def check_file(path, settings=None, tokenizer=None, role="train", context=None, 
                     context["signatures"].setdefault(key, []).append(
                         {"file": path, "line": line_no, "signature": sig})
                     if isinstance(target, dict):
-                        context["target_keys"].update(target)
+                        context["target_keys"].update((key, option) for option in target)
                         for option in qres["options"]:
-                            context["option_lines"].setdefault(option, []).append((path, line_no, key))
+                            context["option_lines"].setdefault((key, option), []).append((path, line_no, key))
                 if qres["type"]:
                     type_counts[qres["type"]] = type_counts.get(qres["type"], 0) + 1
                 questions.append(qres)
@@ -924,11 +924,11 @@ def finalize_observations(context):
             findings.append(_finding("W01", first["file"], first["line"], key,
                                      f"问题键 {key!r} 在不同记录里 type/instructions/选项不同，出现在 {lines}",
                                      "统一同一个问题键的规格，或给不同规格换一个键名"))
-    for option, seen in context["option_lines"].items():
-        if option not in context["target_keys"]:
+    for (key, option), seen in context["option_lines"].items():
+        if (key, option) not in context["target_keys"]:
             first = seen[0]
-            findings.append(_finding("W02", first[0], first[1], first[2],
-                                     f"选项 {option!r} 从未被任何 target 使用",
+            findings.append(_finding("W02", first[0], first[1], key,
+                                     f"问题 {key!r} 的选项 {option!r} 从未作为答案出现",
                                      "确认这是有意给出的干扰项，否则补上标注"))
     return findings
 

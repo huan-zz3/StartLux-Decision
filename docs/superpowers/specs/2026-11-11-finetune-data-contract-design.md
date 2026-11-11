@@ -176,7 +176,7 @@ Length:
 - `W01` the same question key has a different `type`, `instructions`, or option set in different records. Varying
   option sets is legal (the server accepts any option list per request), but it weakens learning; list the conflicting
   lines.
-- `W02` an option id that no target anywhere uses (a decision the data never exercises).
+- `W02` an option id that no target uses, counted per question key (an id used by another question does not count).
 - `W03` unknown top-level keys (the trainer ignores them), `noul` `criteria` that the renderer discards, an empty
   question key, duplicate `state` within a split (text only; `E17` also compares image bytes), a `state` far longer
   than the dataset median.

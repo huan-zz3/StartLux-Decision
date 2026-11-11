@@ -290,6 +290,21 @@ class VerdictContainmentTest(unittest.TestCase):
         items, over_options, too_long = trainer.load_items(path, self.tok, 32)
         self.assertEqual((items, over_options, too_long), ([], 0, 1))
 
+    def test_w02_is_per_question_and_option(self):
+        questions = {"type": "choice", "instructions": "Pick", "criteria": ["a", "b"]}
+        recs = [
+            {"state": "s1", "questions": {"q1": dict(questions)}, "targets": {"q1": {"a": 0.5, "b": 0.5}}},
+            {"state": "s2", "questions": {"q2": dict(questions)}, "targets": {"q2": {"a": 1.0}}},
+        ]
+        path = _write_jsonl(self.dir, recs, name="w02.jsonl")
+        context = {"signatures": {}, "option_lines": {}, "target_keys": set()}
+        check.check_file(path, tokenizer=self.tok, context=context)
+        w02 = [f for f in check.finalize_observations(context) if f["rule"] == "W02"]
+        self.assertEqual(len(w02), 1)
+        self.assertEqual(w02[0]["question"], "q2")
+        self.assertIn("选项 'b'", w02[0]["message"])
+        self.assertNotIn("q1", [f["question"] for f in w02])
+
     def test_empty_question_key_is_an_observation_not_a_blocker(self):
         rec = {"state": "s", "questions": {"": {"type": "noul", "instructions": "x"}},
                "targets": {"": {"true": 1.0}}}
@@ -691,7 +706,20 @@ class SampleFileTest(unittest.TestCase):
         result = check.check_file(sample)
         blocking = [f for f in result["findings"] if f["kind"] == "E"]
         self.assertEqual(blocking, [])
-        self.assertGreater(result["counts"]["trainable"], 0)
+        self.assertEqual(result["counts"]["trainable"], 41)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = check.main([sample])
+        self.assertEqual(code, 0)
+        text = out.getvalue()
+        w02 = [line for line in text.splitlines() if line.startswith("[W02]")]
+        self.assertEqual(len(w02), 3)
+        self.assertEqual({line.split("问题 ", 1)[1] for line in w02}, {
+            "'mood' 的选项 '0' 从未作为答案出现",
+            "'mood' 的选项 '2' 从未作为答案出现",
+            "'damaged' 的选项 'false' 从未作为答案出现",
+        })
+        self.assertIn("41 个可训练", text)
 
     def test_render_one_exits_zero(self):
         sample = os.path.join(ROOT, "examples", "finetune", "sample.jsonl")

@@ -171,7 +171,7 @@ D) account: Login and account access
 | E18 | 阻断 | prompt 超过 `--max-length`（`--tokenizer` 模式精确判定；离线只能判定图片侧下界） |
 | E19 | 阻断 | 目标值不是有限数字（`NaN` / `Infinity` 会让训练 loss 变成 NaN） |
 | W01 | 观察 | 同一问题 id 在不同记录里定义不一致 |
-| W02 | 观察 | 某个选项从未作为答案出现 |
+| W02 | 观察 | 某个选项从未作为答案出现（按问题键 + 选项 id 分别统计） |
 | W03 | 观察 | 未知顶层键、被忽略的 `noul` criteria、问题键为空、重复 state（只看文本）、超长 state |
 | W04 | 观察 | dev 集某类问题少于 200 条 |
 

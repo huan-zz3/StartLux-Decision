@@ -59,7 +59,7 @@ startlux-decide eval --compare bf16.jsonl fp8.jsonl
 `--compare` 报告所选答案的一致率、两个构建各自的准确率及其差值（对请求做 95% bootstrap 区间）、门控决策（是否思考）的一致率，以及每个问题上任一选项概率的最大变化。
 
 | 模型 | 构建 | 引擎 | 与 BF16 的一致率 | 准确率 BF16 → 构建（差值的 95% CI） | 思考决策一致 | max \|Δp\|（均值） |
-|---|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|
 | 4B Instant | FP8 | vLLM | TODO | TODO | n/a | TODO |
 | 4B AutoThink | FP8 | vLLM | TODO | TODO | TODO | TODO |
 | 4B AutoThink | GGUF Q8_0 | llama.cpp | TODO | TODO | TODO | TODO |
