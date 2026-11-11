@@ -162,11 +162,18 @@ CUDA_VISIBLE_DEVICES=5 .venv/bin/startlux-decide serve \
 
 ### 4.4 会静默消失的数据
 
-以下三类不会报错，只是被跳过，所以训练前先看第一行的 `skipped` 计数：
+训练端仍然是“跳过而不报错”：选项超过 26 个的 `choice`、渲染后超过 `--max-length`（默认 8,192 token）的问题
+都会被跳过，日志里两种原因分开计数；没有 `targets` 的问题在训练端被跳过，在检查器里是阻断错误。
+所以数据交出去之前先跑检查器：
 
-- 没有 `targets` 的问题；
-- 选项超过 26 个的 `choice`（要先拆成每批不超过 26 个选项）；
-- 渲染后提示长度超过 `--max-length`（默认 8,192 token）的问题，图片的 token 也算在内。
+```bash
+conda install pillow          # 只有这一个非标准库依赖
+python3 finetune/check_data.py data/train.jsonl --report data/train.report.json --against data/dev.jsonl
+python3 finetune/check_data.py data/train.jsonl --render 5
+```
+
+缺 `targets`、选项超过 26 个在自检里就是阻断错误；超长在带 `--tokenizer` 的验收运行里阻断（图片侧离线也判）。
+完整的字段规则、规则编号和交接流程见 [finetune_data.md](finetune_data.md)。
 
 ### 4.5 用模型预标注来省力
 

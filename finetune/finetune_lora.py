@@ -108,17 +108,17 @@ def _record_media(rec, path, line, image_factor, min_pixels, max_pixels, max_ima
 
 def load_items(path, tok, max_length, *, image_factor=32, min_pixels=MIN_PIXELS, max_pixels=MAX_PIXELS,
                max_images=MAX_IMAGES):
-    """-> ([Item], number skipped).
+    """-> ([Item], number skipped for over MAX_OPTIONS options, number skipped as too long).
 
     Questions without targets are skipped, as are choice questions over 26 options and prompts whose effective length
-    (after image expansion) exceeds `max_length`.  A malformed row, target or image raises with the file and line
-    instead of silently disappearing.
+    (after image expansion) exceeds `max_length`; the two causes are counted separately.  A malformed row, target or
+    image, or a target key that is not an option id, raises with the file and line instead of silently disappearing.
     """
-    items, skipped = [], 0
+    items, skipped_over_options, skipped_too_long = [], 0, 0
     with open(path, encoding="utf-8") as f:
         for n, line in enumerate(f, 1):
             if not line.strip():
-                continue
+                continue  # not-a-finding: blank line
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError as e:
@@ -140,7 +140,7 @@ def load_items(path, tok, max_length, *, image_factor=32, min_pixels=MIN_PIXELS,
             for key, q in rec["questions"].items():
                 target = targets.get(key)
                 if target is None:
-                    continue
+                    continue  # rule: E12
                 if not isinstance(target, dict):
                     raise ValueError(f"{path}:{n} question {key!r}: target must be an object mapping option ids to "
                                      "probabilities")
@@ -150,18 +150,27 @@ def load_items(path, tok, max_length, *, image_factor=32, min_pixels=MIN_PIXELS,
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     raise ValueError(f"{path}:{n} question {key!r}: {e}") from None
                 if row["type"] == "choice" and len(order) > MAX_OPTIONS:
-                    skipped += 1            # split very wide lists into groups of up to 26 before training
-                    continue
+                    # split very wide lists into groups of up to 26 before training
+                    skipped_over_options += 1
+                    continue  # rule: E08
                 try:
                     prompt = plain_prompt(tok, messages(row))
                     ids = tok.encode(prompt, add_special_tokens=False)
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     raise ValueError(f"{path}:{n} question {key!r}: {e}") from None
+                bad = sorted(k for k in target if k not in order)
+                if bad:
+                    raise ValueError(f"{path}:{n} question {key!r}: target key(s) {', '.join(map(repr, bad))} not one "
+                                     f"of the option ids ({', '.join(map(repr, order))})")
                 try:
                     vec = [float(target.get(o, 0.0)) for o in order]
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, ArithmeticError):
                     raise ValueError(f"{path}:{n} question {key!r}: target probabilities must be numbers") from None
-                total = math.fsum(vec)
+                try:
+                    total = math.fsum(vec)
+                except (ArithmeticError, ValueError):
+                    raise ValueError(f"{path}:{n} question {key!r}: target probabilities are not a usable "
+                                     "distribution (overflow)") from None
                 if total <= 0:
                     raise ValueError(f"{path}:{n} question {key!r}: target has no mass on the listed options")
                 if media is not None:
@@ -174,11 +183,11 @@ def load_items(path, tok, max_length, *, image_factor=32, min_pixels=MIN_PIXELS,
                     prompt = None
                     length = len(ids)
                 if length > max_length:
-                    skipped += 1
-                    continue
+                    skipped_too_long += 1
+                    continue  # rule: E18
                 items.append(Item(ids=ids, options=len(order), target=[v / total for v in vec], type=row["type"],
                                   length=length, prompt=prompt, media=media))
-    return items, skipped
+    return items, skipped_over_options, skipped_too_long
 
 
 def batches(items, max_tokens, shuffle, seed):
@@ -351,12 +360,15 @@ def train(a, tokenizer=None):
     if folder.letter_token_ids is not None and list(letters) != list(folder.letter_token_ids):
         raise ValueError("tokenizer letter ids differ from decision_config.json")
 
-    train_items, skipped = load_items(a.train, tok, a.max_length, image_factor=folder.image_factor,
-                                      min_pixels=a.min_pixels, max_pixels=a.max_pixels)
-    dev_items, _ = (load_items(a.dev, tok, a.max_length, image_factor=folder.image_factor,
-                               min_pixels=a.min_pixels, max_pixels=a.max_pixels) if a.dev else ([], 0))
-    print(f"{len(train_items)} training questions ({skipped} skipped: too long or over {MAX_OPTIONS} options), "
-          f"{len(dev_items)} dev questions", flush=True)
+    train_items, skipped_over_options, skipped_too_long = load_items(
+        a.train, tok, a.max_length, image_factor=folder.image_factor,
+        min_pixels=a.min_pixels, max_pixels=a.max_pixels)
+    dev_items, dev_over_options, dev_too_long = (
+        load_items(a.dev, tok, a.max_length, image_factor=folder.image_factor,
+                   min_pixels=a.min_pixels, max_pixels=a.max_pixels) if a.dev else ([], 0, 0))
+    print(f"{len(train_items)} training questions ({skipped_over_options} skipped: over {MAX_OPTIONS} options, "
+          f"{skipped_too_long} skipped: too long), {len(dev_items)} dev questions ({dev_over_options} skipped: "
+          f"over {MAX_OPTIONS} options, {dev_too_long} skipped: too long)", flush=True)
     if not train_items:
         raise SystemExit("no training questions left after rendering and filtering")
     if a.calibrate and not dev_items:

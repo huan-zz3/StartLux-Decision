@@ -21,3 +21,12 @@ models.
 - Choice options given as a list, or under `options`, are knocked out like `{option: description}`. Before, a list of
   more than 26 options, or of 26 when the extra "None of the above" option was added (`none_check` is on by default),
   was refused with a 422.
+- `finetune/finetune_lora.py`: a target key that is not an option id now raises with the file, line, question and key
+  instead of being read as zero, so a typo cannot train on the wrong label. The training log also counts the two skip
+  causes separately (over 26 options, too long).
+- `finetune/check_data.py`: a single-file data checker for the people who prepare fine-tuning data (standard library
+  + Pillow; no repository, no model folder, no training dependency). It reports blocking and observation findings with
+  stable rule ids and file:line, renders the prompt the model will read, writes the normalized record set, checks
+  train/dev overlap, converts the dev split to eval data, and emits a handoff report; `--tokenizer <model folder>` adds
+  exact prompt lengths during acceptance. The contract it enforces is `docs/zh/finetune_data.md` (Chinese, for the data
+  provider).

@@ -5,6 +5,7 @@
 | 文档 | 什么时候读它 |
 |---|---|
 | [finetune_quickstart.md](finetune_quickstart.md) | 第一次用自己的数据微调：从自检、跑通、做数据、测基线，到训练与前后对比（本文为中文原创，无英文对应） |
+| [finetune_data.md](finetune_data.md) | 准备微调数据：字段、题型、目标概率、图片、规则编号与交接流程（本文为中文原创，无英文对应） |
 | [finetuning.md](finetuning.md) | 查微调的参考细节：环境、数据字段、参数默认值、校准、部署与评测 |
 | [api.md](api.md) | 写客户端：请求与响应格式、控制项、置信度、`none_probability`、错误 |
 | [none_probability.md](none_probability.md) | 使用 `none_probability`：它是什么意思、怎么测出来的、阈值为什么是 0.2 |

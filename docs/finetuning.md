@@ -66,6 +66,10 @@ hf download startlux-models/StartLux-Decision-v1.1-0.8B-Instant \
 
 ## Data
 
+The normative contract, written for the people who prepare the data, is
+[zh/finetune_data.md](zh/finetune_data.md) (Chinese only, by design); verify a file with
+`python3 finetune/check_data.py data/train.jsonl` before training. The summary below is the short version.
+
 One JSON object per line, in the same shape as a request plus the answers you want:
 
 ```json

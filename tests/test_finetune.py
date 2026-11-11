@@ -77,8 +77,8 @@ class LoadItemsTest(unittest.TestCase):
 
     def test_normalizes_targets_in_option_order(self):
         path = _write_jsonl(self.dir, [_row()])
-        items, skipped = finetune.load_items(path, self.tok, 8192)
-        self.assertEqual(skipped, 0)
+        items, skipped_over_options, skipped_too_long = finetune.load_items(path, self.tok, 8192)
+        self.assertEqual((skipped_over_options, skipped_too_long), (0, 0))
         self.assertEqual(len(items), 1)
         item = items[0]
         self.assertEqual((item.options, item.type), (2, "choice"))
@@ -92,23 +92,61 @@ class LoadItemsTest(unittest.TestCase):
         rec = _row()
         rec["targets"] = {}
         path = _write_jsonl(self.dir, [rec])
-        items, skipped = finetune.load_items(path, self.tok, 8192)
-        self.assertEqual((items, skipped), ([], 0))
+        items, over_options, too_long = finetune.load_items(path, self.tok, 8192)
+        self.assertEqual((items, over_options, too_long), ([], 0, 0))
 
-    def test_choice_over_26_options_is_skipped(self):
+    def test_unknown_target_key_raises_with_file_line_question_and_key(self):
+        rec = _row(targets={"q": {"billling": 0.7, "shipping": 0.3}})
+        path = _write_jsonl(self.dir, [rec])
+        with self.assertRaises(ValueError) as ctx:
+            finetune.load_items(path, self.tok, 8192)
+        message = str(ctx.exception)
+        self.assertIn(path, message)
+        self.assertIn(":1", message)
+        self.assertIn("'q'", message)
+        self.assertIn("billling", message)
+
+    def test_unknown_target_key_alongside_a_valid_one_still_raises(self):
+        rec = _row(targets={"q": {"billing": 0.7, "billling": 0.3}})
+        path = _write_jsonl(self.dir, [rec])
+        with self.assertRaises(ValueError) as ctx:
+            finetune.load_items(path, self.tok, 8192)
+        self.assertIn("billling", str(ctx.exception))
+
+    def test_choice_over_26_options_counts_only_the_options_skip(self):
         crit = {f"o{i}": None for i in range(27)}
         rec = _row(questions={"q": {"type": "choice", "instructions": "Pick", "criteria": crit}},
                    targets={"q": {"o0": 1.0}})
         path = _write_jsonl(self.dir, [rec])
-        items, skipped = finetune.load_items(path, self.tok, 8192)
+        items, over_options, too_long = finetune.load_items(path, self.tok, 8192)
         self.assertEqual(items, [])
-        self.assertEqual(skipped, 1)
+        self.assertEqual((over_options, too_long), (1, 0))
 
-    def test_prompt_over_max_length_is_skipped(self):
+    def test_prompt_over_max_length_counts_only_the_length_skip(self):
         path = _write_jsonl(self.dir, [_row()])
-        items, skipped = finetune.load_items(path, self.tok, 4)
+        items, over_options, too_long = finetune.load_items(path, self.tok, 4)
         self.assertEqual(items, [])
-        self.assertEqual(skipped, 1)
+        self.assertEqual((over_options, too_long), (0, 1))
+
+    def test_target_too_large_for_a_float_raises_with_file_and_line(self):
+        rec = _row(targets={"q": {"billing": 10 ** 400, "shipping": 0}})
+        path = _write_jsonl(self.dir, [rec])
+        with self.assertRaises(ValueError) as ctx:
+            finetune.load_items(path, self.tok, 8192)
+        message = str(ctx.exception)
+        self.assertIn(path, message)
+        self.assertIn(":1", message)
+        self.assertIn("'q'", message)
+
+    def test_target_with_mixed_infinities_raises_with_file_and_line(self):
+        rec = _row(targets={"q": {"billing": float("inf"), "shipping": float("-inf")}})
+        path = _write_jsonl(self.dir, [rec])
+        with self.assertRaises(ValueError) as ctx:
+            finetune.load_items(path, self.tok, 8192)
+        message = str(ctx.exception)
+        self.assertIn(path, message)
+        self.assertIn(":1", message)
+        self.assertIn("'q'", message)
 
     def test_target_without_mass_raises_with_file_and_line(self):
         rec = _row(targets={"q": {"billing": 0, "shipping": 0}})
@@ -162,8 +200,8 @@ class ImageLoadItemsTest(unittest.TestCase):
     def test_image_record_expands_length_and_keeps_prompt_and_media(self):
         rec = _row(images=[self.uri])
         rec["state"] = "Photo: <image>"
-        items, skipped = self._load(rec)
-        self.assertEqual(skipped, 0)
+        items, skipped_over_options, skipped_too_long = self._load(rec)
+        self.assertEqual((skipped_over_options, skipped_too_long), (0, 0))
         item = items[0]
         self.assertIsNotNone(item.media)
         self.assertIsNotNone(item.prompt)
@@ -178,7 +216,7 @@ class ImageLoadItemsTest(unittest.TestCase):
     def test_image_marks_place_images_in_order(self):
         rec = _row(images=[self.uri, self.uri])
         rec["state"] = "left <image> right <image>"
-        items, _ = self._load(rec)
+        items, _, _ = self._load(rec)
         item = items[0]
         self.assertEqual(item.prompt.count(finetune.IMAGE_PLACEHOLDER), 2)
         self.assertLess(item.prompt.index("left"), item.prompt.index(finetune.IMAGE_PLACEHOLDER))
@@ -186,8 +224,8 @@ class ImageLoadItemsTest(unittest.TestCase):
         self.assertEqual(item.length, len(item.ids) + 2 * (item.media.tokens[0] - 1))
 
     def test_empty_image_list_is_a_text_record(self):
-        items, skipped = self._load(_row(images=[]))
-        self.assertEqual(skipped, 0)
+        items, over_options, too_long = self._load(_row(images=[]))
+        self.assertEqual((over_options, too_long), (0, 0))
         self.assertIsNone(items[0].media)
         self.assertIsNone(items[0].prompt)
         self.assertEqual(items[0].length, len(items[0].ids))
@@ -195,7 +233,7 @@ class ImageLoadItemsTest(unittest.TestCase):
     def test_without_marks_images_come_first(self):
         rec = _row(images=[self.uri])
         rec["state"] = "Photo attached"
-        items, _ = self._load(rec)
+        items, _, _ = self._load(rec)
         prompt = items[0].prompt
         self.assertIn(finetune.IMAGE_PLACEHOLDER, prompt)
         self.assertLess(prompt.index(finetune.IMAGE_PLACEHOLDER), prompt.index("Photo attached"))
@@ -203,11 +241,11 @@ class ImageLoadItemsTest(unittest.TestCase):
     def test_max_length_uses_expanded_image_length(self):
         rec = _row(images=[self.uri])
         rec["state"] = "Photo: <image>"
-        items, _ = self._load(rec)
+        items, _, _ = self._load(rec)
         item = items[0]
-        items, skipped = self._load(rec, max_length=len(item.ids))
+        items, over_options, too_long = self._load(rec, max_length=len(item.ids))
         self.assertEqual(items, [])
-        self.assertEqual(skipped, 1)
+        self.assertEqual((over_options, too_long), (0, 1))
 
     def test_marks_without_images_raise_with_file_and_line(self):
         rec = _row()

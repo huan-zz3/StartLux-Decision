@@ -16,3 +16,4 @@ bench_*.csv
 models/
 *.log
 data/
+.slim/deepwork/
