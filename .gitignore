@@ -15,5 +15,6 @@ bench_*.csv
 .codegraph/
 models/
 *.log
-data/
+data/*
+!data/decision_sample/
 .slim/deepwork/

@@ -3,18 +3,18 @@
 这份文档写给**准备数据的人**，不要求你读过本项目的引擎代码。它和 `finetune/check_data.py` 是同一份规则的两种形式：
 文档解释为什么，脚本负责判定。**规则以脚本为准**——脚本报 `E` 的那一条就是不能训练的那一条。
 
-一句话流程：
+一句话流程（以下命令在仓库根目录执行；脚本在 `finetune/` 下，也可以先 `cd finetune` 再省略路径前缀）：
 
 ```bash
 # 1. 数据方自检（只需要 Python 和 Pillow）
-python3 check_data.py data/train.jsonl --report data/train.report.json --against data/dev.jsonl
-python3 check_data.py data/dev.jsonl --role dev --report data/dev.report.json --against data/train.jsonl
+python3 finetune/check_data.py data/train.jsonl --report data/train.report.json --against data/dev.jsonl
+python3 finetune/check_data.py data/dev.jsonl --role dev --report data/dev.report.json --against data/train.jsonl
 
 # 2. 看一眼模型实际会读到什么（强烈建议，至少看 5 条）
-python3 check_data.py data/train.jsonl --render 5
+python3 finetune/check_data.py data/train.jsonl --render 5
 
 # 3. dev 集转成评测文件（可选，评测时才用）
-python3 check_data.py data/dev.jsonl --role dev --emit-eval data/dev_eval.jsonl
+python3 finetune/check_data.py data/dev.jsonl --role dev --emit-eval data/dev_eval.jsonl
 ```
 
 `--against` 传另一份划分，用来查 train/dev 是否重叠（E17）；不传时报告会把 E17 列为“未验证”。
@@ -77,10 +77,25 @@ python3 check_data.py data/dev.jsonl --role dev --emit-eval data/dev_eval.jsonl
   想给两个选项加说明请写成 `{"true": "…", "false": "…"}`；对象里除 `true`/`false` 之外的键同样被忽略，
   并会报 `W03`。
 
+### 其他被接受的写法
+
+下面这些形态训练端和检查器都接受，只是不推荐作为主要写法：
+
+- `instructions` 可以是**对象**：会渲染成紧凑 JSON 文本作为问题文案。空对象会变成字面量 `"{}"`，
+  不算 `E11`；只有空字符串/纯空白才报 `E11`。
+- `choice` 的 `criteria` 值可以是 `null`：表示该选项没有说明文案，渲染器只写选项 id
+  （效果等同于把 `criteria` 写成选项列表）。
+- `score` 的 `criteria` 可以是**对象列表**，例如 `[{"level": "0", "definition": "…"}]`：
+  每个元素会被渲染成紧凑 JSON 字符串，档位 id 仍然是 `"0"`…`"n-1"`。推荐直接用字符串列表。
+- `targets` 里的数字字符串（如 `"0.75"`）会按 `float()` 转换后使用，见「目标概率」。
+
 ## 目标概率
 
 - 键必须来自该问题的选项 id，否则算 `E13`。这一条以前会被**静默当成 0**，现在直接报错。
+- `targets` 里出现不属于任何问题的键会报 `W03`：训练端会忽略这些键，通常是问题 id 拼错了。
 - 值必须是非负数（`E15`），且总和不能为 0（`E14`）。
+- 值会先按 `float()` 转换再使用，所以 `"0.75"` 这样的数字字符串也能训练；转不成数字的字符串才算 `E14`。
+  大于 1 的值同样合法，会和其他值一起按比例归一化。
 - **不需要自己归一化**：写成票数 `{"billing": 3, "shipping": 1}` 和写成概率 `{"billing": 0.75, "shipping": 0.25}`
   等价，脚本会按比例归一化。多个标注者的票数可以直接写。
 - 只有一个标签就写 one-hot `{"billing": 1.0}`。
@@ -164,7 +179,7 @@ D) account: Login and account access
 | E11 | 阻断 | choice/score 的 `instructions` 为空 |
 | E12 | 阻断 | 某个问题没有 `targets` 条目 |
 | E13 | 阻断 | `targets` 里出现不属于该选项集合的键 |
-| E14 | 阻断 | 目标值不是数字，或总质量为 0 |
+| E14 | 阻断 | 目标值无法转成数字，或总质量为 0 |
 | E15 | 阻断 | 目标值出现负数 |
 | E16 | 阻断 | dev 集出现并列最高概率 |
 | E17 | 阻断 | train/dev 出现重复证据（需要 `--against`；不传则该规则标为未验证） |
@@ -172,7 +187,7 @@ D) account: Login and account access
 | E19 | 阻断 | 目标值不是有限数字（`NaN` / `Infinity` 会让训练 loss 变成 NaN） |
 | W01 | 观察 | 同一问题 id 在不同记录里定义不一致 |
 | W02 | 观察 | 某个选项从未作为答案出现（按问题键 + 选项 id 分别统计） |
-| W03 | 观察 | 未知顶层键、被忽略的 `noul` criteria、问题键为空、重复 state（只看文本）、超长 state |
+| W03 | 观察 | 未知顶层键、被忽略的 `noul` criteria、问题键为空、重复 state（只看文本）、超长 state、不属于任何问题的 target 键 |
 | W04 | 观察 | dev 集某类问题少于 200 条 |
 
 ## 交接流程

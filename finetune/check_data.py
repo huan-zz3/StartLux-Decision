@@ -34,7 +34,7 @@
     E11 [trainer]  choice/score 的 instructions 为空白
     E12 [contract] 某个问题在 targets 里没有条目
     E13 [trainer]  target 的键不是该问题的选项 id
-    E14 [trainer]  target 的值不是数字，或总质量为零
+    E14 [trainer]  target 的值无法转成数字（数字字符串按 float 转换后接受），或总质量为零
     E15 [contract] target 的值为负数
     E16 [contract] --role dev：最高概率在 1e-9 内并列
     E17 [contract] --against：train/dev 的 state + 图片重叠
@@ -43,7 +43,8 @@
 
     W01 同一个问题键在不同记录里 type/instructions/选项集合不同
     W02 某个问题里的选项从未作为该问题的答案出现
-    W03 未知顶层键；空问题键；渲染器丢弃的 noul criteria；同一 split 内重复 state；state 长度超过中位数 4 倍
+    W03 未知顶层键；空问题键；targets 里不属于任何问题的键；渲染器丢弃的 noul criteria；同一 split 内重复
+        state；state 长度超过中位数 4 倍
     W04 --role dev：某类型的问题少于 200 个
 
 ``--report`` 写出的 JSON 键固定为：
@@ -735,12 +736,16 @@ def check_file(path, settings=None, tokenizer=None, role="train", context=None, 
             except json.JSONDecodeError as e:
                 rec_findings.append(_finding("E01", path, line_no, None, f"不是合法 JSON：{e}",
                                              "修好这一行的 JSON 语法"))
-                result["records"].append(_record_result(path, line_no, None, "", None, [], [], rec_findings))
+                result["records"].append(_record_result(path, line_no, None, "", None,
+                                                         {"raw": [], "sizes": [], "tokens": []}, [],
+                                                         rec_findings))
                 continue
             if not isinstance(rec, dict):
                 rec_findings.append(_finding("E01", path, line_no, None, "这一行不是 JSON 对象",
                                              "每行写一个 {...} 对象"))
-                result["records"].append(_record_result(path, line_no, None, "", None, [], [], rec_findings))
+                result["records"].append(_record_result(path, line_no, None, "", None,
+                                                         {"raw": [], "sizes": [], "tokens": []}, [],
+                                                         rec_findings))
                 continue
 
             unknown_keys = [k for k in rec if k not in ALLOWED_KEYS]
@@ -802,12 +807,14 @@ def check_file(path, settings=None, tokenizer=None, role="train", context=None, 
                     placed = place_images(text, len(image_raw))
 
             questions_raw = rec.get("questions")
-            if not isinstance(questions_raw, dict):
+            questions_object = isinstance(questions_raw, dict)
+            if not questions_object:
                 rec_findings.append(_finding("E06", path, line_no, None, "questions 缺失或不是对象",
                                              "把 questions 写成 {问题键: 问题规格} 的对象"))
                 questions_raw = {}
             targets_raw = rec.get("targets") or {}
-            if not isinstance(targets_raw, dict):
+            targets_object = isinstance(targets_raw, dict)
+            if not targets_object:
                 rec_findings.append(_finding("E14", path, line_no, None, "targets 不是对象",
                                              "把 targets 写成 {问题键: {选项id: 概率}} 的对象"))
                 targets_raw = {}
@@ -855,6 +862,14 @@ def check_file(path, settings=None, tokenizer=None, role="train", context=None, 
                 if qres["type"]:
                     type_counts[qres["type"]] = type_counts.get(qres["type"], 0) + 1
                 questions.append(qres)
+
+            if questions_object and targets_object:
+                extra_targets = sorted(set(targets_raw) - set(questions_raw))
+                if extra_targets:
+                    rec_findings.append(_finding(
+                        "W03", path, line_no, None,
+                        f"targets 里有不属于任何问题的键：{extra_targets!r}（训练器会忽略）",
+                        "删掉这些键，或检查问题 id 是否拼错"))
 
             rec_blocked = any(f["kind"] == "E" for f in rec_findings)
             for qres in questions:
@@ -905,6 +920,9 @@ def _finding_line(finding):
 
 
 def _record_result(path, line_no, rec, text, placed, images, questions, findings):
+    if not isinstance(images, dict):
+        # E01 行没有经过图片解析，也要和正常记录同形：报告、canonical 与 render 都直接读这三个键。
+        images = {"raw": [], "sizes": [], "tokens": []}
     return {"path": path, "line": line_no, "record": rec, "state_text": text, "placed": placed,
             "images": images, "questions": questions, "findings": findings}
 

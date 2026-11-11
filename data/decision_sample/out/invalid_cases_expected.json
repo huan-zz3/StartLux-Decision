@@ -1,0 +1,146 @@
+[
+  {
+    "line": 1,
+    "id": "invalid-01",
+    "base_row_id": "b08-0046",
+    "defect": "missing 'state'",
+    "expected": "missing required field: state"
+  },
+  {
+    "line": 2,
+    "id": "invalid-02",
+    "base_row_id": "b11-0093",
+    "defect": "missing 'targets'",
+    "expected": "missing required field: targets"
+  },
+  {
+    "line": 3,
+    "id": "invalid-03",
+    "base_row_id": "b10-0054",
+    "defect": "'questions' is a list, not an object",
+    "expected": "questions must be a mapping"
+  },
+  {
+    "line": 4,
+    "id": "invalid-04",
+    "base_row_id": "b02-0012",
+    "defect": "question missing 'type'",
+    "expected": "question.type is required"
+  },
+  {
+    "line": 5,
+    "id": "invalid-05",
+    "base_row_id": "b07-0046",
+    "defect": "unknown question type",
+    "expected": "question.type must be one of choice|noul|score"
+  },
+  {
+    "line": 6,
+    "id": "invalid-06",
+    "base_row_id": "b08-0052",
+    "defect": "choice has a single option",
+    "expected": "choice requires >= 2 criteria",
+    "also_violates": "target keys no longer match criteria keys"
+  },
+  {
+    "line": 7,
+    "id": "invalid-07",
+    "base_row_id": "b06-0041",
+    "defect": "choice missing 'criteria'",
+    "expected": "choice.criteria is required"
+  },
+  {
+    "line": 8,
+    "id": "invalid-08",
+    "base_row_id": "b03-0023",
+    "defect": "empty 'instructions'",
+    "expected": "instructions must be non-empty"
+  },
+  {
+    "line": 9,
+    "id": "invalid-09",
+    "base_row_id": "b05-0106",
+    "defect": "target options do not match criteria keys",
+    "expected": "target keys must equal criteria keys"
+  },
+  {
+    "line": 10,
+    "id": "invalid-10",
+    "base_row_id": "b09-0089",
+    "defect": "probability does not sum to 1",
+    "expected": "target distribution must sum to 1"
+  },
+  {
+    "line": 11,
+    "id": "invalid-11",
+    "base_row_id": "b01-0084",
+    "defect": "negative probability",
+    "expected": "probabilities must be in [0, 1]",
+    "also_violates": "distribution no longer sums to 1"
+  },
+  {
+    "line": 12,
+    "id": "invalid-12",
+    "base_row_id": "b03-0016",
+    "defect": "probability as string",
+    "expected": "probabilities must be numbers"
+  },
+  {
+    "line": 13,
+    "id": "invalid-13",
+    "base_row_id": "b06-0010",
+    "defect": "target missing a question key",
+    "expected": "every question needs a target"
+  },
+  {
+    "line": 14,
+    "id": "invalid-14",
+    "base_row_id": "b04-0035",
+    "defect": "target for a question that does not exist",
+    "expected": "targets must not reference unknown questions"
+  },
+  {
+    "line": 15,
+    "id": "invalid-15",
+    "base_row_id": "b03-0112",
+    "defect": "state is a number",
+    "expected": "state must be a string or JSON object"
+  },
+  {
+    "line": 16,
+    "id": "invalid-16",
+    "base_row_id": "b07-0060",
+    "defect": "empty question key",
+    "expected": "question keys must be non-empty"
+  },
+  {
+    "line": 17,
+    "id": "invalid-17",
+    "base_row_id": "b08-0060",
+    "defect": "'targets' is a list",
+    "expected": "targets must be a mapping"
+  },
+  {
+    "line": 18,
+    "id": "invalid-18",
+    "base_row_id": "b01-0079",
+    "defect": "noul question carries 'criteria'",
+    "expected": "noul must not define criteria",
+    "also_violates": "noul target keys no longer match criteria keys"
+  },
+  {
+    "line": 19,
+    "id": "invalid-19",
+    "base_row_id": "b04-0123",
+    "defect": "noul target uses yes/no keys",
+    "expected": "noul target keys must be true/false"
+  },
+  {
+    "line": 20,
+    "id": "invalid-20",
+    "base_row_id": "b01-0089",
+    "defect": "probability above 1",
+    "expected": "probabilities must be in [0, 1]",
+    "also_violates": "distribution no longer sums to 1"
+  }
+]
