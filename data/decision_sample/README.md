@@ -1,6 +1,6 @@
 # decision 数据集测试样本（decision-index 同族格式）
 
-用于校验「decision 数据格式检验脚本」的小体量样本集。总大小 < 700 KB，共 360 行，无需登录、无需下载大文件。
+用于校验「decision 数据格式检验脚本」的小体量样本集。`out/` 约 780 KB、共 372 行，无需登录、无需下载大文件。
 
 - **内容来源**：Hugging Face `mghafiri/decision-model-scenarios`（2,000 条合成场景 / 9,716 个类型化问题 / 32 个业务域，MIT 许可）
 - **为什么不用 decision-index**：官方套件 12.5 万条请求、约 7 GB 下载量，且需要登录接受 HALE/GSM8K 条款；本目录只取同一范式（`state` + 类型化 `questions` + 概率 `targets`）的轻量数据
@@ -14,6 +14,10 @@
 | `out/decision_sample_extended_40.jsonl` | 40 | 更宽的**合法**空间：对象/数组 `state`、`criteria` 为 null、`score` 题型、对象型 `instructions` |
 | `out/invalid_cases.jsonl` | 20 | **负样本**，每行注入且仅注入一个缺陷，用于验证脚本「该拒的确实拒了」 |
 | `out/invalid_cases_expected.json` | — | 负样本清单：行号、缺陷描述、期望报错、可能的连带违规 |
+| `out/image_cases.jsonl` | 5 | **图片规则样本**：合法 data URI、坏 base64、可解码但 Pillow 读不出、长宽比 >200、`<image>` 标记数与图片数不匹配 |
+| `out/image_cases_expected.json` | — | 图片规则样本清单：行号、缺陷、期望规则（E03/E04/E05）或 accepted |
+| `out/image_quality_cases.jsonl` | 7 | **图片质量建议样本**：1 条合法 + 6 条只触发 `W05` 的记录（JPEG 估计质量 <90、非 RGB、透明度、EXIF 方向、MIME 不符、原图过小会被放大） |
+| `out/image_quality_cases_expected.json` | — | 图片质量样本清单：行号、缺陷、期望（accepted 或 W05） |
 | `build_dataset.py` | — | 生成脚本，确定性（seed=20261111），可复现 |
 | `verify.py` | — | 独立实现的严格校验器，可作为你脚本的对照基准 |
 | `data_raw/` | 2,000 | 上游原始 jsonl（7.3 MB），离线复现用 |
@@ -71,6 +75,12 @@
 `invalid_cases.jsonl` 的 20 行覆盖：缺 `state`、缺 `targets`、`questions` 为数组、缺 `type`、未知 `type`、单选项 choice、缺 `criteria`、空 `instructions`、target 键与 criteria 不符、概率和 ≠ 1、负概率、概率为字符串、缺某个问题的 target、target 指向不存在的问题、`state` 为数字、空问题键、`targets` 为数组、noul 带 criteria、noul 用 yes/no 键、概率 > 1。
 
 用法：逐行喂给你的脚本，期望**全部被拒**；再对照 `invalid_cases_expected.json` 检查报错定位是否指向正确字段。`also_violates` 字段标出「同一处必然会连带触发」的次要违规，避免把正确行为误判成误报。
+
+`image_cases.jsonl` 的 5 行是图片规则的**正/负样本**：第 1 行是合法记录（期望 `accepted`），其余分别触发 `E03`（坏 base64）、`E03`（base64 可解码但 Pillow 读不出）、`E05`（201×1 超过 200 倍长宽比）、`E04`（`state` 有 2 个 `<image>` 标记但只有 1 张图）。期望见 `image_cases_expected.json`；它和 `invalid_cases_expected.json` 的 `expected` 含义不同——后者的文案来自对照校验器，这两个图片清单写的是检查器的规则编号或 `accepted`。
+
+`image_quality_cases.jsonl` 的 7 行是**质量建议**正/负样本：第 1 行合法，其余 6 行各触发一条 `W05`（JPEG 估计质量 <90、非 RGB、透明度、EXIF 方向、data URI MIME 不符、原图过小会被插值放大）。`W05` 只警告、不报错，所以这个文件的退出码是 **0**；期望见 `image_quality_cases_expected.json`。
+
+这两组图片样本的 base64 都由 `docs/assets/score_vs_size.png` 的固定裁剪派生（格式/质量变体），不是手写字符串；坏 base64 与不可解码样本也是从真实 PNG 字节做单点破坏得到的。`verify.py` 不校验图片。
 
 ## 复现与调整
 

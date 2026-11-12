@@ -390,6 +390,183 @@ class ImageArithmeticTest(unittest.TestCase):
 
 
 @NEEDS_PIL
+class ImageRuleMappingTest(unittest.TestCase):
+    """Each image failure sub-cause must land on its documented rule, not just "some" blocker."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="startlux_check_image_rules_")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _blocking_rules(self, images, state="photo"):
+        rec = _record_with({"q": {"type": "noul", "instructions": "Damaged?"}}, state=state,
+                           images=images, targets={"q": {"true": 1.0}})
+        path = _write_jsonl(self.dir, [rec], name="one.jsonl")
+        result = check.check_file(path)
+        return [f["rule"] for f in result["findings"] if f["kind"] == "E"], result
+
+    def test_images_not_a_list_is_e03(self):
+        rules, _result = self._blocking_rules("not a list")
+        self.assertEqual(rules, ["E03"])
+
+    def test_invalid_base64_is_e03(self):
+        rules, _result = self._blocking_rules(["not base64!"])
+        self.assertEqual(rules, ["E03"])
+
+    def test_valid_base64_that_is_not_an_image_is_e03(self):
+        rules, _result = self._blocking_rules([base64.b64encode(b"hello world").decode("ascii")])
+        self.assertEqual(rules, ["E03"])
+
+    def test_aspect_ratio_over_200_is_e05(self):
+        rules, result = self._blocking_rules([_png_uri(201, 1)])
+        self.assertEqual(rules, ["E05"])
+        message = next(f["message"] for f in result["findings"] if f["rule"] == "E05")
+        self.assertIn("长宽比", message)
+
+    def test_marked_image_with_matching_count_has_no_blocker(self):
+        rules, result = self._blocking_rules([_png_uri()], state="photo <image>")
+        self.assertEqual(rules, [])
+        self.assertEqual(result["records"][0]["state_text"].count("<image>"), 1)
+
+
+@NEEDS_PIL
+class ImageQualityWarningTest(unittest.TestCase):
+    """W05 is advisory: known quality problems must be visible, but must never become a blocker.
+
+    The cases synthesize their own images with Pillow, so they do not depend on ``data/decision_sample``.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="startlux_check_image_quality_")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _run(self, images, name="one.jsonl"):
+        rec = _record_with({"q": {"type": "noul", "instructions": "Damaged?"}}, state="photo <image>",
+                           images=images, targets={"q": {"true": 1.0}})
+        path = _write_jsonl(self.dir, [rec], name=name)
+        return check.check_file(path), path
+
+    @staticmethod
+    def _uri(image, fmt="PNG", mime=None, **save):
+        buf = io.BytesIO()
+        image.save(buf, format=fmt, **save)
+        declared = mime or ("image/jpeg" if fmt == "JPEG" else "image/png")
+        return f"data:{declared};base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+    @staticmethod
+    def _bytes_uri(data, mime="image/jpeg"):
+        return f"data:{mime};base64," + base64.b64encode(data).decode("ascii")
+
+    @staticmethod
+    def _image(mode="RGB", size=(320, 320)):
+        from PIL import Image
+        color = {"RGB": (120, 30, 200), "RGBA": (120, 30, 200, 128), "L": 128}[mode]
+        return Image.new(mode, size, color)
+
+    def _w05(self, result):
+        return [f for f in result["findings"] if f["rule"] == "W05"]
+
+    def test_jpeg_quality_is_read_back_exactly(self):
+        # Pillow encodes with libjpeg's standard IJG tables, so the estimate must match each table exactly.
+        for quality in (30, 50, 89):
+            with self.subTest(quality=quality):
+                result, _path = self._run([self._uri(self._image(), fmt="JPEG", quality=quality)],
+                                          f"q{quality}.jsonl")
+                w05 = self._w05(result)
+                self.assertEqual(len(w05), 1)
+                self.assertIn(f"质量估计约 {quality}（<90）", w05[0]["message"])
+                self.assertEqual([f for f in result["findings"] if f["kind"] == "E"], [])
+        for quality in (90, 95):        # the threshold is "<90": exactly 90 must stay quiet
+            with self.subTest(quality=quality):
+                result, _path = self._run([self._uri(self._image(), fmt="JPEG", quality=quality)],
+                                          f"q{quality}.jsonl")
+                self.assertEqual(self._w05(result), [])
+
+    def test_exif_orientation_and_mime_mismatch(self):
+        exif = self._image().getexif()
+        exif[274] = 6
+        result, _path = self._run([self._uri(self._image(), fmt="JPEG", quality=95, exif=exif)], "exif.jsonl")
+        w05 = self._w05(result)
+        self.assertEqual(len(w05), 1)
+        self.assertIn("EXIF", w05[0]["message"])
+
+        result, _path = self._run([self._uri(self._image(), mime="image/jpeg")], "mime.jsonl")
+        w05 = self._w05(result)
+        self.assertEqual(len(w05), 1)
+        self.assertIn("MIME", w05[0]["message"])
+
+    def test_mime_aliases_are_not_reported(self):
+        result, _path = self._run([self._uri(self._image(), fmt="JPEG", quality=95, mime="image/jpg")],
+                                  "jpg-alias.jsonl")
+        self.assertEqual(self._w05(result), [])
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGBA", (256, 256), (120, 30, 200, 255)).save(buf, format="ICO", sizes=[(256, 256)])
+        result, _path = self._run([self._bytes_uri(buf.getvalue(), mime="image/x-icon")], "ico.jsonl")
+        self.assertEqual(self._w05(result), [])
+
+    def test_modes_and_upscaling(self):
+        result, _path = self._run([self._uri(self._image("RGBA"))], "rgba.jsonl")
+        w05 = self._w05(result)
+        self.assertEqual(len(w05), 1)
+        self.assertIn("alpha", w05[0]["message"])
+
+        from PIL import Image
+        opaque = Image.new("RGBA", (320, 320), (120, 30, 200, 255))
+        result, _path = self._run([self._uri(opaque)], "opaque-rgba.jsonl")
+        self.assertEqual(self._w05(result), [])
+
+        keyed = self._uri(self._image(), transparency=(120, 30, 200))    # RGB + tRNS colour key
+        result, _path = self._run([keyed], "trns.jsonl")
+        w05 = self._w05(result)
+        self.assertEqual(len(w05), 1)
+        self.assertIn("tRNS", w05[0]["message"])
+
+        result, _path = self._run([self._uri(self._image("L"))], "gray.jsonl")
+        w05 = self._w05(result)
+        self.assertEqual(len(w05), 1)
+        self.assertIn("非 RGB", w05[0]["message"])
+
+        palette = self._image().convert("P")
+        result, _path = self._run([self._uri(palette)], "palette.jsonl")
+        w05 = self._w05(result)
+        self.assertEqual(len(w05), 1)
+        self.assertIn("调色板", w05[0]["message"])
+
+        result, _path = self._run([self._uri(self._image())], "rgb.jsonl")
+        self.assertEqual(self._w05(result), [])
+
+        result, _path = self._run([self._uri(self._image(size=(64, 64)))], "small.jsonl")
+        w05 = self._w05(result)
+        self.assertEqual(len(w05), 1)
+        self.assertIn("放大", w05[0]["message"])
+
+    def test_corrupt_exif_stays_advisory(self):
+        """A corrupt EXIF block must not turn a decodable image into E03 (dpi keeps Pillow from eating the error)."""
+        buf = io.BytesIO()
+        self._image().save(buf, format="JPEG", quality=95, dpi=(72, 72))
+        payload = b"Exif\x00\x00XX\x00\x00" + b"\x00" * 16
+        segment = b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
+        data = buf.getvalue()
+        result, _path = self._run([self._bytes_uri(data[:2] + segment + data[2:])], "bad-exif.jsonl")
+        self.assertEqual([f for f in result["findings"] if f["kind"] == "E"], [])
+        self.assertEqual(self._w05(result), [])
+        self.assertEqual(result["counts"]["trainable"], 1)
+
+    def test_w05_only_file_exits_zero(self):
+        _result, path = self._run([self._uri(self._image(), fmt="JPEG", quality=50)], "advisory.jsonl")
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = check.main([path])
+        self.assertEqual(code, 0, out.getvalue() + err.getvalue())
+        self.assertIn("[W05]", out.getvalue())
+        self.assertNotIn("[E", out.getvalue() + err.getvalue())
+
+
+@NEEDS_PIL
 class EmitEvalTest(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="startlux_check_eval_")
@@ -646,7 +823,7 @@ class RuleCompletenessTest(unittest.TestCase):
 
     def test_rule_ids_and_tags_are_the_documented_set(self):
         self.assertEqual(sorted(check.RULE_INFO), sorted(
-            [f"E{i:02d}" for i in range(1, 20)] + ["W01", "W02", "W03", "W04"]))
+            [f"E{i:02d}" for i in range(1, 20)] + ["W01", "W02", "W03", "W04", "W05"]))
         self.assertEqual({rule: info[0] for rule, info in check.RULE_INFO.items() if rule.startswith("E")}, {
             "E01": "trainer", "E02": "contract", "E03": "trainer", "E04": "trainer", "E05": "trainer",
             "E06": "trainer", "E07": "trainer", "E08": "trainer", "E09": "trainer", "E10": "trainer",
@@ -660,7 +837,7 @@ class RuleCompletenessTest(unittest.TestCase):
 @NEEDS_PIL
 class ImportGuardTest(unittest.TestCase):
     ALLOWED = {"__future__", "argparse", "base64", "binascii", "hashlib", "io", "json", "math", "os", "re",
-               "statistics", "string", "subprocess", "sys", "traceback", "PIL"}
+               "statistics", "string", "struct", "subprocess", "sys", "traceback", "PIL"}
 
     def test_imports_are_stdlib_plus_pil(self):
         with open(CHECK, encoding="utf-8") as f:

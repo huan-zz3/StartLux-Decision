@@ -1,0 +1,44 @@
+[
+  {
+    "line": 1,
+    "id": "imgq-good",
+    "defect": null,
+    "expected": "accepted"
+  },
+  {
+    "line": 2,
+    "id": "imgq-jpeg-q50",
+    "defect": "JPEG estimated quality 50 (<90)",
+    "expected": "W05"
+  },
+  {
+    "line": 3,
+    "id": "imgq-gray",
+    "defect": "grayscale (L) PNG is not RGB",
+    "expected": "W05"
+  },
+  {
+    "line": 4,
+    "id": "imgq-rgba",
+    "defect": "RGBA alpha is dropped without compositing",
+    "expected": "W05"
+  },
+  {
+    "line": 5,
+    "id": "imgq-exif-rotated",
+    "defect": "EXIF Orientation=6 is not applied",
+    "expected": "W05"
+  },
+  {
+    "line": 6,
+    "id": "imgq-mime-mismatch",
+    "defect": "data URI says image/jpeg but the bytes are PNG",
+    "expected": "W05"
+  },
+  {
+    "line": 7,
+    "id": "imgq-upscale",
+    "defect": "64x64 is below min_pixels, smart_resize upscales",
+    "expected": "W05"
+  }
+]

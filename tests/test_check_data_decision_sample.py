@@ -1,8 +1,8 @@
 """Regression tests for ``finetune/check_data.py`` against the local decision sample.
 
-``data/`` is gitignored, so the whole suite skips unless the sample files exist on this machine.  The fixtures are
-read-only: nothing is downloaded and no optional dependency (transformers/torch) is needed beyond the standard
-library plus Pillow, which the checker itself requires.
+The fixtures live in ``data/decision_sample/out``; a trimmed checkout without them skips the whole suite.  They are
+read-only: nothing is downloaded and no optional dependency (transformers/torch) is needed beyond the standard library
+plus Pillow, which the checker itself requires.
 """
 from __future__ import annotations
 
@@ -19,7 +19,9 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHECK = os.path.join(ROOT, "finetune", "check_data.py")
 SAMPLE = os.path.join(ROOT, "data", "decision_sample", "out")
-HAS_SAMPLE = os.path.exists(os.path.join(SAMPLE, "decision_sample_300.jsonl"))
+SAMPLE_FILES = ("decision_sample_300.jsonl", "decision_sample_extended_40.jsonl", "invalid_cases.jsonl",
+                "image_cases.jsonl", "image_quality_cases.jsonl")
+HAS_SAMPLE = all(os.path.exists(os.path.join(SAMPLE, name)) for name in SAMPLE_FILES)
 
 
 def _load(name, path):
@@ -136,6 +138,43 @@ class DecisionSampleTest(unittest.TestCase):
         extra_key_lines = {f["line"] for f in result["findings"]
                            if f["rule"] == "W03" and "不属于任何问题" in f["message"]}
         self.assertEqual(extra_key_lines, {14, 16})
+
+    def test_image_cases_matrix(self):
+        path = os.path.join(SAMPLE, "image_cases.jsonl")
+        result = check.check_file(path)
+        rules = _rule_sets(result)
+        trainable = {rec["line"]: [q["trainable"] for q in rec["questions"]] for rec in result["records"]}
+        self.assertEqual(result["counts"], {"records": 5, "questions": 5, "trainable": 1,
+                                            "blocked": 4, "blocked_records": 4})
+        self.assertEqual(rules[1], set())
+        self.assertTrue(all(trainable[1]))
+        self.assertEqual(rules[2], {"E03"})
+        self.assertEqual(rules[3], {"E03"})
+        self.assertEqual(rules[4], {"E05"})
+        self.assertEqual(rules[5], {"E04"})
+        aspect = [f for f in result["findings"] if f["rule"] == "E05" and f["line"] == 4]
+        self.assertTrue(any("长宽比" in f["message"] for f in aspect))
+        self.assertEqual([f for f in result["findings"] if f["rule"] == "W05"], [])
+
+    def test_image_quality_cases_matrix(self):
+        path = os.path.join(SAMPLE, "image_quality_cases.jsonl")
+        result = check.check_file(path)
+        rules = _rule_sets(result)
+        self.assertEqual(result["counts"], {"records": 7, "questions": 7, "trainable": 7,
+                                            "blocked": 0, "blocked_records": 0})
+        for line in range(1, 8):
+            with self.subTest(line=line):
+                self.assertEqual(rules[line], set())
+        w05 = {}
+        for rec in result["records"]:
+            w05[rec["line"]] = [f["message"] for f in rec["findings"] if f["rule"] == "W05"]
+        self.assertEqual(w05[1], [])
+        expected = {2: ("质量",), 3: ("非 RGB", "mode"), 4: ("透明度", "alpha"),
+                    5: ("EXIF",), 6: ("MIME",), 7: ("放大",)}
+        for line, needles in expected.items():
+            with self.subTest(line=line):
+                self.assertEqual(len(w05[line]), 1)
+                self.assertTrue(any(needle in w05[line][0] for needle in needles), w05[line][0])
 
     def test_dev_split_against_train(self):
         with open(os.path.join(SAMPLE, "decision_sample_300.jsonl"), encoding="utf-8") as f:

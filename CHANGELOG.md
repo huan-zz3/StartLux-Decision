@@ -30,3 +30,8 @@ models.
   train/dev overlap, converts the dev split to eval data, and emits a handoff report; `--tokenizer <model folder>` adds
   exact prompt lengths during acceptance. The contract it enforces is `docs/zh/finetune_data.md` (Chinese, for the data
   provider).
+- `finetune/check_data.py` also reports advisory image-quality observations (`W05`): actual transparency, non-RGB pixel
+  modes, EXIF orientation, JPEG quality estimated from the quantization tables below 90, data-URI MIME that disagrees
+  with the decoded format, and originals below `--min-pixels`. They never change the exit code. `data/decision_sample/`
+  ships fixtures with expected rule ids for the image rules (`out/image_cases.jsonl` and
+  `out/image_quality_cases.jsonl`, each with an `_expected.json`).

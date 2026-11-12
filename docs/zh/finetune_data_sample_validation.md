@@ -2,7 +2,7 @@
 
 这份文档记录 `finetune/check_data.py` 在 `data/decision_sample/` 上的实测结果，以及这个样本能证明什么、不能证明什么。规则本身见 [finetune_data.md](finetune_data.md)。
 
-`data/` 在 `.gitignore` 里，样本不会随仓库分发。`tests/test_check_data_decision_sample.py` 复现下面的矩阵，找不到样本时整组跳过；脚本与训练端的一致性由 `tests/test_check_data.py` 单独保证。
+`data/decision_sample` 随仓库分发。`tests/test_check_data_decision_sample.py` 复现下面的矩阵；目录缺失时（例如裁剪过的检出）整组跳过。脚本与训练端的一致性由 `tests/test_check_data.py` 单独保证。
 
 ## 怎么重跑
 
@@ -15,6 +15,8 @@ python3 -m unittest -q tests.test_check_data_decision_sample   # 本文的矩阵
 python3 finetune/check_data.py data/decision_sample/out/decision_sample_300.jsonl
 python3 finetune/check_data.py data/decision_sample/out/decision_sample_extended_40.jsonl
 python3 finetune/check_data.py data/decision_sample/out/invalid_cases.jsonl
+python3 finetune/check_data.py data/decision_sample/out/image_cases.jsonl
+python3 finetune/check_data.py data/decision_sample/out/image_quality_cases.jsonl
 ```
 
 ## 基线
@@ -24,6 +26,8 @@ python3 finetune/check_data.py data/decision_sample/out/invalid_cases.jsonl
 | `decision_sample_300.jsonl` | 300 | 1079 | 1078 | 1 | 仅 `E08`（第 205 行 `service` 有 28 个选项）；`W01` 76 条；`W03` 含 `domain` 未知键与超长 state |
 | `decision_sample_extended_40.jsonl` | 40 | 200 | 200 | 0 | 无 E；对象 `instructions`、对象型 `score.criteria`、对象/数组 `state` 均被接受 |
 | `invalid_cases.jsonl` | 20 | 64 | 44 | 20 | 13 行被拒、7 行被接受，见下表 |
+| `image_cases.jsonl` | 5 | 5 | 1 | 4 | 第 1 行合法；`E03` 坏 base64、`E03` 不可读图片、`E05` 201×1、`E04` 标记数不匹配；0 条 W05 |
+| `image_quality_cases.jsonl` | 7 | 7 | 7 | 0 | 第 1 行合法；其余 6 行各 1 条 `W05`：JPEG 质量、非 RGB、透明度、EXIF、MIME、放大；**退出码 0** |
 
 核心 300 条里另有 1 个并列最高概率（第 147 行 `b03-0084` 的 `greener_than`，0.44/0.44）。它留在 train 里合法；如果拆进 dev，会按 `E16` 阻断。
 
@@ -63,7 +67,7 @@ python3 finetune/check_data.py data/decision_sample/out/invalid_cases.jsonl
 
 ## 这个样本覆盖不到什么
 
-- **图片规则**：样本 0 张图片，`E03`/`E05` 完全没覆盖，`E04` 只能用自造的 `<image>` 标记验证。图片 token 估算、`--image-factor`、E18 的图片部分都不在此样本范围内。
+- **图片规则**：`image_cases.jsonl` 自带 1 条合法与 4 条缺陷记录（坏 base64、可解码但 Pillow 读不出、长宽比 >200、标记数不匹配），覆盖 `E03`/`E04`/`E05`；`image_quality_cases.jsonl` 用真实图片裁剪派生 1 条合法与 6 条 `W05` 建议（JPEG 质量、非 RGB、透明度、EXIF、MIME、放大），验证“只警告不报错”。`tests/test_check_data.py::ImageRuleMappingTest` 与 `ImageQualityWarningTest` 另外锁定规则归属和阈值。图片 token 估算、`--image-factor`、E18 的图片部分仍不在此样本范围内。
 - **E18 文本长度**：需要 `--tokenizer` 和 `transformers`；最长 state 约 2,873 字符，通常不会越界，造不出阻断用例。
 - **E01**：样本 20 条负样本都是合法 JSON；坏 JSON 行由 `tests/test_check_data_decision_sample.py` 的 fixture 覆盖。
 - **E09/E10/E19**：样本没有非法 score 层数、非法选项 id、`NaN`/`Infinity`；这些由 `tests/test_check_data.py` 的 fixture 覆盖。

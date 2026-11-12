@@ -1,0 +1,32 @@
+[
+  {
+    "line": 1,
+    "id": "img-valid",
+    "defect": null,
+    "expected": "accepted"
+  },
+  {
+    "line": 2,
+    "id": "img-bad-base64",
+    "defect": "images[0] is not valid base64",
+    "expected": "E03"
+  },
+  {
+    "line": 3,
+    "id": "img-not-an-image",
+    "defect": "base64 decodes but Pillow cannot read the bytes",
+    "expected": "E03"
+  },
+  {
+    "line": 4,
+    "id": "img-aspect-201",
+    "defect": "201x1 image exceeds the 200x aspect limit",
+    "expected": "E05"
+  },
+  {
+    "line": 5,
+    "id": "img-mark-mismatch",
+    "defect": "state has 2 <image> marks for 1 image",
+    "expected": "E04"
+  }
+]

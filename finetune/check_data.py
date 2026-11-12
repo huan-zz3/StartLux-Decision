@@ -46,6 +46,8 @@
     W03 未知顶层键；空问题键；targets 里不属于任何问题的键；渲染器丢弃的 noul criteria；同一 split 内重复
         state；state 长度超过中位数 4 倍
     W04 --role dev：某类型的问题少于 200 个
+    W05 图片质量建议（alpha 通道或 tRNS 透明、非 RGB 模式、EXIF 方向、JPEG 质量、data URI MIME、原始像素过小），
+        只观察不阻断
 
 ``--report`` 写出的 JSON 键固定为：
 
@@ -91,6 +93,7 @@ import os
 import re
 import statistics
 import string
+import struct
 import subprocess
 import sys
 import traceback
@@ -217,6 +220,28 @@ RULE_INFO = {
     "W02": ("observation", "问题里的选项从未作为答案出现"),
     "W03": ("observation", "数据观察项"),
     "W04": ("observation", "dev 集某类型问题过少"),
+    "W05": ("observation", "图片质量建议"),
+}
+
+# IJG 标准亮度量化表（自然顺序，与 Pillow 的 img.quantization[0] 同序），用于反推 JPEG 质量。
+_IJG_LUMA = (
+    16, 11, 10, 16, 24, 40, 51, 61,
+    12, 12, 14, 19, 26, 58, 60, 55,
+    14, 13, 16, 24, 40, 57, 69, 56,
+    14, 17, 22, 29, 51, 87, 80, 62,
+    18, 22, 37, 56, 68, 109, 103, 77,
+    24, 35, 55, 64, 81, 104, 113, 92,
+    49, 64, 78, 87, 103, 121, 120, 101,
+    72, 92, 95, 98, 112, 100, 103, 99,
+)
+
+# data URI 里常见的 MIME 别名 -> Pillow 的 format 名映射出的 "image/<format>"，避免把正确的声明报成不符。
+_MIME_ALIASES = {
+    "image/jpg": "image/jpeg",
+    "image/pjpeg": "image/jpeg",
+    "image/x-png": "image/png",
+    "image/x-icon": "image/ico",
+    "image/vnd.microsoft.icon": "image/ico",
 }
 
 
@@ -467,8 +492,76 @@ def decode(value):
         raise ValueError("an image must be a base64 string or a data URI") from None
 
 
-def image_info(values, factor=FACTOR, min_pixels=MIN_PIXELS, max_pixels=MAX_PIXELS, max_images=MAX_IMAGES):
-    """解码一份图片列表 -> (raw, sizes, tokens)。报错文字与 startlux_decide.images.load_media 相同。"""
+def _jpeg_quality(img):
+    """从亮度量化表反推 JPEG 质量（1..100）：先找逐项相等的质量，再按表求和找最近的。"""
+    table = img.quantization.get(0)
+    if not table:
+        return None
+
+    def reference(q):
+        # libjpeg 的 jpeg_quality_scaling：q<50 时用整数除法 5000//q，不能写成浮点。
+        scale = 5000 // q if q < 50 else 200 - 2 * q
+        return [min(255, max(1, (value * scale + 50) // 100)) for value in _IJG_LUMA]
+
+    for q in range(1, 101):
+        if reference(q) == list(table):
+            return q
+    total = sum(table)
+    return min(range(1, 101), key=lambda q: abs(sum(reference(q)) - total))
+
+
+def _quality_notes(img, index, mime, min_pixels):
+    """成功解码的图片上值得提醒的质量问题；调用方在 img.convert("RGB") 之前收集，之后证据就没了。"""
+    notes = []
+    fmt = (img.format or "").lower()
+    mode = img.mode
+    # RGBA/LA/PA 里全不透明的 alpha 通道无害，很多工具会把 RGB 内容存成 opaque RGBA，不能因此报警。
+    alpha_modes = ("RGBA", "LA", "PA")
+    if mode in alpha_modes:
+        transparent = img.getchannel("A").getextrema()[0] < 255
+    else:
+        # P 的 tRNS 是色键/索引，RGB/L 的 tRNS 是颜色键；convert("RGB") 一样会丢掉透明度。
+        transparent = "transparency" in img.info
+    if transparent:
+        notes.append((index, f"带透明度（{mode} 的 alpha/tRNS），convert(\"RGB\") 会丢掉它且不做背景合成，"
+                             "透明区域的颜色取决于生成工具；请先合成到白底或线上底色再编码"))
+    elif mode not in alpha_modes and mode != "RGB":
+        notes.append((index, f"像素模式是 {mode}（非 RGB）：颜色信息可能已在导出时丢失"
+                             "（灰度、调色板最多 256 色、CMYK），convert(\"RGB\") 只做模式转换不会补回；"
+                             "16-bit 还会被截成 8-bit（实测 1000 已是纯白）。请先转成 sRGB 8-bit"))
+    try:
+        orientation = img.getexif().get(274, 1)
+    except (SyntaxError, struct.error, ValueError, OSError):
+        # EXIF 是可选元数据：坏块在 Pillow 的 Exif.load 里抛 SyntaxError/struct.error（JPEG 头部带 dpi 时
+        # _open 不会替我们吞掉）。一条本来能解码的图片不能因此变成 E03，更不能让检查器以 2 退出。
+        orientation = 1
+    if orientation != 1:
+        notes.append((index, f"EXIF Orientation={orientation}，训练路径不做 exif_transpose，会按未旋转的"
+                             "像素训练；请先按 EXIF 转正并剥掉该标记"))
+    if fmt == "jpeg":
+        quality = _jpeg_quality(img)
+        if quality is not None and quality < 90:
+            notes.append((index, f"JPEG 质量估计约 {quality}（<90），压缩伪影会先损坏小字和细图标；"
+                                 "请用质量 ≥90 重新导出或改用 PNG"))
+    if mime:
+        # Pillow 的 format 名不是 MIME 名：data URI 里常见的别名先归一，否则 ICO 之类的格式会误报。
+        expected = _MIME_ALIASES.get(mime, mime)
+        if expected != (f"image/{fmt}" if fmt else ""):
+            notes.append((index, f"data URI 声明 {mime}，实际解码格式是 image/{fmt}；"
+                                 "请把 MIME 改成与实际格式一致"))
+    if img.width * img.height < min_pixels:
+        notes.append((index, f"原始像素 {img.width}x{img.height}（面积 {img.width * img.height}）"
+                             f"小于最小像素数 {min_pixels}，smart_resize 会插值放大，不产生新细节；"
+                             "请提供更大的原图或裁剪到需要的区域"))
+    return notes
+
+
+def image_info(values, factor=FACTOR, min_pixels=MIN_PIXELS, max_pixels=MAX_PIXELS, max_images=MAX_IMAGES,
+               notes=None):
+    """解码一份图片列表 -> (raw, sizes, tokens)。报错文字与 startlux_decide.images.load_media 相同。
+
+    ``notes`` 给出时，在 ``convert("RGB")`` 之前把每张可解码图片的质量提示按 ``(1 起的序号, 消息)`` 追加进去。
+    """
     if not isinstance(values, (list, tuple)):
         raise ValueError("images must be a list of base64 strings or data URIs")
     if len(values) > max_images:
@@ -479,6 +572,8 @@ def image_info(values, factor=FACTOR, min_pixels=MIN_PIXELS, max_pixels=MAX_PIXE
         try:
             img = Image.open(io.BytesIO(data))
             fmt = (img.format or "").lower()
+            if notes is not None:
+                notes.extend(_quality_notes(img, k + 1, mime, min_pixels))
             img = img.convert("RGB")
         except (UnidentifiedImageError, OSError) as e:
             raise ValueError(f"image {k + 1} is not a readable image ({e})") from None
@@ -713,6 +808,8 @@ def _fix_for(rule):
         "E05": "裁剪或等比缩放图片，让长边与短边相差不超过 200 倍",
         "E11": "给 choice/score 问题写一句非空的 instructions",
         "E14": "把 target 写成 {选项id: 概率} 的对象，且至少一个选项的概率为正",
+        "W05": "先合成到不透明底色、转成 sRGB 8-bit、按 EXIF 转正、JPEG 用质量 ≥90 或改用 PNG；"
+               "原图面积小于最小像素数时换更大的原图或裁剪到需要的区域（默认 256x256，可用 --min-pixels 调整）",
     }.get(rule, "按规则说明修改该字段")
 
 
@@ -782,10 +879,11 @@ def check_file(path, settings=None, tokenizer=None, role="train", context=None, 
                                                  f"images 有 {len(images)} 张，超过上限 {settings.max_images}",
                                                  f"把每条记录的图片数降到 {settings.max_images} 张以内"))
                 else:
+                    image_notes = []
                     try:
                         image_raw, image_sizes, image_tokens = image_info(
                             images, settings.image_factor, settings.min_pixels, settings.max_pixels,
-                            settings.max_images)
+                            settings.max_images, notes=image_notes)
                     except _ImageAspectError as e:
                         rec_findings.append(_finding("E05", path, line_no, None, str(e), _fix_for("E05")))
                     except ValueError as e:
@@ -793,6 +891,10 @@ def check_file(path, settings=None, tokenizer=None, role="train", context=None, 
                             "E03", path, line_no, None,
                             f"图片无法读取：必须是 base64 字符串或 data URI，且能被 Pillow 解码（原始信息：{e}）",
                             _fix_for("E03")))
+                    else:
+                        for k, message in image_notes:
+                            rec_findings.append(_finding("W05", path, line_no, None,
+                                                         f"第 {k} 张图片：{message}", _fix_for("W05")))
 
             placed = text
             if not any(f["rule"] in ("E03", "E05") for f in rec_findings):
@@ -920,9 +1022,6 @@ def _finding_line(finding):
 
 
 def _record_result(path, line_no, rec, text, placed, images, questions, findings):
-    if not isinstance(images, dict):
-        # E01 行没有经过图片解析，也要和正常记录同形：报告、canonical 与 render 都直接读这三个键。
-        images = {"raw": [], "sizes": [], "tokens": []}
     return {"path": path, "line": line_no, "record": rec, "state_text": text, "placed": placed,
             "images": images, "questions": questions, "findings": findings}
 
